@@ -1,0 +1,4 @@
+openpyxl==3.1.5
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+streamlit==1.40.1

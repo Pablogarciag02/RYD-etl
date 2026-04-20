@@ -1,0 +1,687 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2821
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 -- =========================================================\
+-- 0) EXTENSIONS\
+-- =========================================================\
+create extension if not exists pgcrypto;\
+-- =========================================================\
+-- 1) SCHEMAS\
+-- =========================================================\
+create schema if not exists raw;\
+create schema if not exists ingest;\
+create schema if not exists core;\
+\
+-- =========================================================\
+-- 2) INGESTION CONTROL TABLE\
+-- =========================================================\
+\
+create table if not exists ingest.import_batches (\
+    id uuid primary key default gen_random_uuid(),\
+    source_file_name text not null,\
+    source_sheet_name text null,\
+    source_system text null,\
+    template_type text null,\
+    uploaded_by text null,\
+    imported_at timestamptz not null default now(),\
+    period_month date null,\
+    rows_detected integer null,\
+    rows_loaded integer null,\
+    rows_failed integer null default 0,\
+    status text not null default 'pending',\
+    checksum text null,\
+    notes text null,\
+    metadata jsonb null,\
+    created_at timestamptz not null default now(),\
+    updated_at timestamptz not null default now(),\
+    constraint import_batches_status_chk check (\
+        status in ('pending', 'processing', 'success', 'partial_success', 'failed')\
+    )\
+);\
+\
+create index if not exists idx_import_batches_source_file_name\
+    on ingest.import_batches (source_file_name);\
+\
+create index if not exists idx_import_batches_status\
+    on ingest.import_batches (status);\
+\
+create index if not exists idx_import_batches_imported_at\
+    on ingest.import_batches (imported_at);\
+\
+-- =========================================================\
+-- 3) RAW TABLES\
+-- =========================================================\
+-- These are intentionally close to source shape.\
+-- Add only minimal metadata for traceability.\
+-- =========================================================\
+\
+create table if not exists raw.raw_leads (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    aglead text null,\
+    fecha_origen_raw text null,\
+    hora_origen_raw text null,\
+    distribuidor text null,\
+    grupo text null,\
+    marca text null,\
+    producto text null,\
+    asesor text null,\
+    campania text null,\
+    subcampania text null,\
+    fuente text null,\
+    medio_atencion text null,\
+    titulo_lead text null,\
+    temperatura text null,\
+    estatus text null,\
+    motivo_finalizacion text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_leads_import_batch_id\
+    on raw.raw_leads (import_batch_id);\
+\
+create index if not exists idx_raw_leads_aglead\
+    on raw.raw_leads (aglead);\
+\
+create index if not exists idx_raw_leads_distribuidor\
+    on raw.raw_leads (distribuidor);\
+\
+create table if not exists raw.raw_lead_activities (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    aglead text null,\
+    fecha_actividad_raw text null,\
+    hora_actividad_raw text null,\
+    fecha_programada_raw text null,\
+    hora_programada_raw text null,\
+    distribuidor text null,\
+    grupo text null,\
+    marca text null,\
+    producto text null,\
+    asesor text null,\
+    campania text null,\
+    subcampania text null,\
+    fuente text null,\
+    actividad text null,\
+    estatus_actividad text null,\
+    temperatura text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_lead_activities_import_batch_id\
+    on raw.raw_lead_activities (import_batch_id);\
+\
+create index if not exists idx_raw_lead_activities_aglead\
+    on raw.raw_lead_activities (aglead);\
+\
+create table if not exists raw.raw_finance_applications (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    folio text null,\
+    codigo_distribuidor text null,\
+    distribuidor_ok text null,\
+    nombre_distribuidor text null,\
+    grupo text null,\
+    marca text null,\
+    oem text null,\
+    producto text null,\
+    carline text null,\
+    modelo text null,\
+    version text null,\
+    anio_modelo_raw text null,\
+    fecha_hora_recibida_raw text null,\
+    fecha_ok_raw text null,\
+    periodo_yyyymm_raw text null,\
+    tipo_vehiculo text null,\
+    estatus text null,\
+    subestatus text null,\
+    tipo_persona text null,\
+    plazo_meses_raw text null,\
+    enganche_raw text null,\
+    porcentaje_enganche_raw text null,\
+    monto_unidad_raw text null,\
+    monto_financiado_raw text null,\
+    aprobado_raw text null,\
+    base_flag_raw text null,\
+    anf_flag_raw text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_finance_applications_import_batch_id\
+    on raw.raw_finance_applications (import_batch_id);\
+\
+create index if not exists idx_raw_finance_applications_folio\
+    on raw.raw_finance_applications (folio);\
+\
+create index if not exists idx_raw_finance_applications_codigo_distribuidor\
+    on raw.raw_finance_applications (codigo_distribuidor);\
+\
+create table if not exists raw.raw_market_prices (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    mes_raw text null,\
+    marca text null,\
+    oem text null,\
+    modelo text null,\
+    version text null,\
+    anio_modelo_raw text null,\
+    segmento_ryd text null,\
+    tipo_carroceria text null,\
+    puertas_raw text null,\
+    precio_lista_raw text null,\
+    precio_contado_neto_raw text null,\
+    precio_financiado_raw text null,\
+    moneda text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_market_prices_import_batch_id\
+    on raw.raw_market_prices (import_batch_id);\
+\
+create index if not exists idx_raw_market_prices_modelo\
+    on raw.raw_market_prices (modelo);\
+\
+create table if not exists raw.raw_sales (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    month_raw text null,\
+    dealer text null,\
+    group_name text null,\
+    brand text null,\
+    oem text null,\
+    carline text null,\
+    sale_type text null,\
+    units_raw text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_sales_import_batch_id\
+    on raw.raw_sales (import_batch_id);\
+\
+create index if not exists idx_raw_sales_dealer\
+    on raw.raw_sales (dealer);\
+\
+create table if not exists raw.raw_claims (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    fecha_raw text null,\
+    poliza text null,\
+    aseguradora text null,\
+    programa text null,\
+    grupo text null,\
+    nombre_agencia text null,\
+    nombre_agencia_2 text null,\
+    cliente text null,\
+    numero_siniestro text null,\
+    cobertura text null,\
+    conductor text null,\
+    telefono text null,\
+    descripcion_vehiculo text null,\
+    vin text null,\
+    modelo text null,\
+    ciudad text null,\
+    estado text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_claims_import_batch_id\
+    on raw.raw_claims (import_batch_id);\
+\
+create index if not exists idx_raw_claims_numero_siniestro\
+    on raw.raw_claims (numero_siniestro);\
+\
+create index if not exists idx_raw_claims_vin\
+    on raw.raw_claims (vin);\
+\
+create table if not exists raw.raw_inegi_sales (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    anio_raw text null,\
+    mes text null,\
+    marca text null,\
+    oem text null,\
+    modelo text null,\
+    tipo_vehiculo text null,\
+    segmento text null,\
+    tipo_origen text null,\
+    pais_origen text null,\
+    cantidad_raw text null,\
+    tema text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_inegi_sales_import_batch_id\
+    on raw.raw_inegi_sales (import_batch_id);\
+\
+create table if not exists raw.raw_dealer_catalog (\
+    id bigserial primary key,\
+    import_batch_id uuid not null references ingest.import_batches(id) on delete cascade,\
+    source_row_number integer null,\
+\
+    codigo_distribuidor text null,\
+    nombre_comercial text null,\
+    razon_social text null,\
+    rfc text null,\
+    grupo text null,\
+    marca text null,\
+    oem text null,\
+    clasificacion text null,\
+    dms text null,\
+    crm text null,\
+    estatus_taller text null,\
+    fecha_inicio_ventas_raw text null,\
+    direccion text null,\
+    municipio text null,\
+    zona_metropolitana text null,\
+    estado text null,\
+    region text null,\
+    codigo_postal text null,\
+    latitud_raw text null,\
+    longitud_raw text null,\
+    raw_payload jsonb null,\
+\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_raw_dealer_catalog_import_batch_id\
+    on raw.raw_dealer_catalog (import_batch_id);\
+\
+create index if not exists idx_raw_dealer_catalog_codigo_distribuidor\
+    on raw.raw_dealer_catalog (codigo_distribuidor);\
+\
+-- =========================================================\
+-- 4) DIMENSIONS\
+-- =========================================================\
+\
+create table if not exists core.dim_group (\
+    id uuid primary key default gen_random_uuid(),\
+    group_name text not null unique,\
+    created_at timestamptz not null default now()\
+);\
+\
+create table if not exists core.dim_brand (\
+    id uuid primary key default gen_random_uuid(),\
+    brand_name text not null unique,\
+    created_at timestamptz not null default now()\
+);\
+\
+create table if not exists core.dim_oem (\
+    id uuid primary key default gen_random_uuid(),\
+    oem_name text not null unique,\
+    created_at timestamptz not null default now()\
+);\
+\
+create table if not exists core.dim_geography (\
+    id uuid primary key default gen_random_uuid(),\
+    country text null default 'Mexico',\
+    state text null,\
+    municipality text null,\
+    metro_area text null,\
+    region text null,\
+    postal_code text null,\
+    latitude numeric(10,6) null,\
+    longitude numeric(10,6) null,\
+    created_at timestamptz not null default now(),\
+    unique (country, state, municipality, metro_area, region, postal_code)\
+);\
+\
+create table if not exists core.dim_insurer (\
+    id uuid primary key default gen_random_uuid(),\
+    insurer_name text not null unique,\
+    created_at timestamptz not null default now()\
+);\
+\
+create table if not exists core.dim_dealer (\
+    id uuid primary key default gen_random_uuid(),\
+    dealer_code text null unique,\
+    commercial_name text not null,\
+    legal_name text null,\
+    rfc text null,\
+    group_id uuid null references core.dim_group(id),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    geography_id uuid null references core.dim_geography(id),\
+    classification text null,\
+    dms text null,\
+    crm text null,\
+    workshop_status text null,\
+    start_sales_date date null,\
+    is_active boolean not null default true,\
+    created_at timestamptz not null default now(),\
+    updated_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_dim_dealer_commercial_name\
+    on core.dim_dealer (commercial_name);\
+\
+create index if not exists idx_dim_dealer_group_id\
+    on core.dim_dealer (group_id);\
+\
+create index if not exists idx_dim_dealer_brand_id\
+    on core.dim_dealer (brand_id);\
+\
+create table if not exists core.dealer_alias_map (\
+    id bigserial primary key,\
+    source_system text null,\
+    source_value text not null,\
+    normalized_value text null,\
+    dealer_id uuid not null references core.dim_dealer(id) on delete cascade,\
+    confidence numeric(5,2) null,\
+    is_manual_override boolean not null default false,\
+    created_at timestamptz not null default now(),\
+    unique (source_system, source_value)\
+);\
+\
+create index if not exists idx_dealer_alias_map_dealer_id\
+    on core.dealer_alias_map (dealer_id);\
+\
+create table if not exists core.dim_product (\
+    id uuid primary key default gen_random_uuid(),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    product_name text not null,\
+    product_type text null,\
+    created_at timestamptz not null default now(),\
+    unique (brand_id, oem_id, product_name)\
+);\
+\
+create index if not exists idx_dim_product_product_name\
+    on core.dim_product (product_name);\
+\
+create table if not exists core.dim_model_version (\
+    id uuid primary key default gen_random_uuid(),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    model_name text not null,\
+    version_name text not null,\
+    body_type text null,\
+    doors integer null,\
+    model_year integer null,\
+    ryd_segment text null,\
+    created_at timestamptz not null default now(),\
+    unique (brand_id, oem_id, model_name, version_name, model_year)\
+);\
+\
+create index if not exists idx_dim_model_version_model_name\
+    on core.dim_model_version (model_name);\
+\
+create table if not exists core.dim_advisor (\
+    id uuid primary key default gen_random_uuid(),\
+    advisor_name text not null,\
+    dealer_id uuid null references core.dim_dealer(id),\
+    created_at timestamptz not null default now(),\
+    unique (advisor_name, dealer_id)\
+);\
+\
+create index if not exists idx_dim_advisor_advisor_name\
+    on core.dim_advisor (advisor_name);\
+\
+create table if not exists core.dim_campaign (\
+    id uuid primary key default gen_random_uuid(),\
+    campaign_name text not null,\
+    subcampaign_name text null,\
+    created_at timestamptz not null default now(),\
+    unique (campaign_name, subcampaign_name)\
+);\
+\
+create table if not exists core.dim_source_channel (\
+    id uuid primary key default gen_random_uuid(),\
+    source_name text not null unique,\
+    created_at timestamptz not null default now()\
+);\
+\
+-- =========================================================\
+-- 5) FACT TABLES\
+-- =========================================================\
+\
+create table if not exists core.fact_leads (\
+    id bigserial primary key,\
+    aglead text not null unique,\
+\
+    dealer_id uuid null references core.dim_dealer(id),\
+    group_id uuid null references core.dim_group(id),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    product_id uuid null references core.dim_product(id),\
+    advisor_id uuid null references core.dim_advisor(id),\
+    campaign_id uuid null references core.dim_campaign(id),\
+    source_channel_id uuid null references core.dim_source_channel(id),\
+    geography_id uuid null references core.dim_geography(id),\
+\
+    lead_origin_ts timestamptz null,\
+    lead_origin_date date null,\
+    lead_origin_hour integer null,\
+    lead_month_num integer null,\
+\
+    temperature text null,\
+    status text null,\
+    finalization_reason text null,\
+    attention_channel text null,\
+    lead_title text null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_fact_leads_dealer_id\
+    on core.fact_leads (dealer_id);\
+\
+create index if not exists idx_fact_leads_lead_origin_date\
+    on core.fact_leads (lead_origin_date);\
+\
+create table if not exists core.fact_lead_activities (\
+    id bigserial primary key,\
+    aglead text not null references core.fact_leads(aglead),\
+\
+    dealer_id uuid null references core.dim_dealer(id),\
+    group_id uuid null references core.dim_group(id),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    product_id uuid null references core.dim_product(id),\
+    advisor_id uuid null references core.dim_advisor(id),\
+    campaign_id uuid null references core.dim_campaign(id),\
+    source_channel_id uuid null references core.dim_source_channel(id),\
+    geography_id uuid null references core.dim_geography(id),\
+\
+    activity_ts timestamptz null,\
+    planned_ts timestamptz null,\
+    activity_name text null,\
+    activity_status text null,\
+    temperature text null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_fact_lead_activities_aglead\
+    on core.fact_lead_activities (aglead);\
+\
+create index if not exists idx_fact_lead_activities_activity_ts\
+    on core.fact_lead_activities (activity_ts);\
+\
+create table if not exists core.fact_finance_applications (\
+    id bigserial primary key,\
+    folio bigint not null unique,\
+\
+    dealer_id uuid null references core.dim_dealer(id),\
+    group_id uuid null references core.dim_group(id),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    product_id uuid null references core.dim_product(id),\
+    geography_id uuid null references core.dim_geography(id),\
+\
+    received_ts timestamptz null,\
+    ok_date date null,\
+    request_period_yyyymm integer null,\
+\
+    vehicle_type text null,\
+    status text null,\
+    substatus text null,\
+    person_type text null,\
+    term_months integer null,\
+\
+    model_year integer null,\
+    model_name text null,\
+    carline text null,\
+    version_name text null,\
+\
+    unit_amount numeric(14,2) null,\
+    down_payment numeric(14,2) null,\
+    down_payment_pct numeric(8,4) null,\
+    financed_amount numeric(14,2) null,\
+\
+    approved_flag boolean null,\
+    base_flag boolean null,\
+    anf_flag boolean null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_fact_finance_applications_dealer_id\
+    on core.fact_finance_applications (dealer_id);\
+\
+create index if not exists idx_fact_finance_applications_ok_date\
+    on core.fact_finance_applications (ok_date);\
+\
+create table if not exists core.fact_market_prices (\
+    id bigserial primary key,\
+    month_date date not null,\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    model_version_id uuid not null references core.dim_model_version(id),\
+\
+    retail_price numeric(14,2) null,\
+    cash_net_price numeric(14,2) null,\
+    finance_price numeric(14,2) null,\
+    currency text null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now(),\
+\
+    unique (month_date, model_version_id)\
+);\
+\
+create index if not exists idx_fact_market_prices_month_date\
+    on core.fact_market_prices (month_date);\
+\
+create table if not exists core.fact_sales (\
+    id bigserial primary key,\
+    month_date date not null,\
+\
+    dealer_id uuid null references core.dim_dealer(id),\
+    group_id uuid null references core.dim_group(id),\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+    product_id uuid null references core.dim_product(id),\
+    geography_id uuid null references core.dim_geography(id),\
+\
+    sale_type text not null,\
+    units integer not null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now(),\
+\
+    unique (month_date, dealer_id, product_id, sale_type)\
+);\
+\
+create index if not exists idx_fact_sales_month_date\
+    on core.fact_sales (month_date);\
+\
+create index if not exists idx_fact_sales_dealer_id\
+    on core.fact_sales (dealer_id);\
+\
+create table if not exists core.fact_claims (\
+    id bigserial primary key,\
+\
+    claim_date date null,\
+    policy_number text null,\
+    insurer_id uuid null references core.dim_insurer(id),\
+\
+    dealer_id uuid null references core.dim_dealer(id),\
+    group_id uuid null references core.dim_group(id),\
+    geography_id uuid null references core.dim_geography(id),\
+\
+    client_name text null,\
+    claim_number text null,\
+    coverage text null,\
+    driver_name text null,\
+    phone text null,\
+\
+    vehicle_description text null,\
+    vin text null,\
+    model_name text null,\
+    city text null,\
+    state text null,\
+    program_name text null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_fact_claims_claim_date\
+    on core.fact_claims (claim_date);\
+\
+create index if not exists idx_fact_claims_insurer_id\
+    on core.fact_claims (insurer_id);\
+\
+create index if not exists idx_fact_claims_claim_number\
+    on core.fact_claims (claim_number);\
+\
+create table if not exists core.fact_market_sales_inegi (\
+    id bigserial primary key,\
+\
+    year_num integer not null,\
+    month_name text not null,\
+    brand_id uuid null references core.dim_brand(id),\
+    oem_id uuid null references core.dim_oem(id),\
+\
+    model_name text not null,\
+    vehicle_type text null,\
+    segment text null,\
+    origin_type text null,\
+    origin_country text null,\
+    quantity integer not null,\
+    topic text null,\
+\
+    source_import_batch_id uuid null references ingest.import_batches(id),\
+    created_at timestamptz not null default now()\
+);\
+\
+create index if not exists idx_fact_market_sales_inegi_year_num\
+    on core.fact_market_sales_inegi (year_num);\
+\
+create index if not exists idx_fact_market_sales_inegi_brand_id\
+    on core.fact_market_sales_inegi (brand_id);}

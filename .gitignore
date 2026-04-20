@@ -1,0 +1,17 @@
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# Source data (contains real dealer/customer data — never push to a public repo)
+*.xlsx
+~$*.xlsx
+sample_uploads/
+Workshop DB RYD - ConMG.pdf
