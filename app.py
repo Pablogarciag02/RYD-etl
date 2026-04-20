@@ -863,7 +863,10 @@ def check_password():
         st.stop()
 
     def _on_submit():
-        if hmac.compare_digest(st.session_state.get("pw_input", ""), str(expected)):
+        entered = st.session_state.get("pw_input", "") or ""
+        # Compare as bytes so non-ASCII (e.g. smart-quote autocorrect) returns
+        # False instead of raising TypeError.
+        if hmac.compare_digest(entered.encode("utf-8"), str(expected).encode("utf-8")):
             st.session_state["auth_ok"] = True
             del st.session_state["pw_input"]
         else:
