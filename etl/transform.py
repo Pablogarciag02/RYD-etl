@@ -7,12 +7,9 @@ def populate_dimensions(cur):
     cur.execute("""
         INSERT INTO core.dim_group (group_name)
         SELECT DISTINCT val FROM (
-            SELECT grupo AS val FROM raw.raw_leads WHERE grupo IS NOT NULL
-            UNION SELECT grupo FROM raw.raw_lead_activities WHERE grupo IS NOT NULL
-            UNION SELECT grupo FROM raw.raw_finance_applications WHERE grupo IS NOT NULL
+            SELECT grupo AS val FROM raw.raw_finance_applications WHERE grupo IS NOT NULL
             UNION SELECT group_name FROM raw.raw_sales WHERE group_name IS NOT NULL
             UNION SELECT grupo FROM raw.raw_claims WHERE grupo IS NOT NULL
-            UNION SELECT grupo FROM raw.raw_dealer_catalog WHERE grupo IS NOT NULL
         ) t
         ON CONFLICT (group_name) DO NOTHING
     """)
@@ -22,12 +19,9 @@ def populate_dimensions(cur):
     cur.execute("""
         INSERT INTO core.dim_brand (brand_name)
         SELECT DISTINCT val FROM (
-            SELECT marca AS val FROM raw.raw_leads WHERE marca IS NOT NULL
-            UNION SELECT marca FROM raw.raw_lead_activities WHERE marca IS NOT NULL
-            UNION SELECT marca FROM raw.raw_finance_applications WHERE marca IS NOT NULL
+            SELECT marca AS val FROM raw.raw_finance_applications WHERE marca IS NOT NULL
             UNION SELECT marca FROM raw.raw_market_prices WHERE marca IS NOT NULL
             UNION SELECT brand FROM raw.raw_sales WHERE brand IS NOT NULL
-            UNION SELECT marca FROM raw.raw_dealer_catalog WHERE marca IS NOT NULL
             UNION SELECT marca FROM raw.raw_inegi_sales WHERE marca IS NOT NULL
         ) t
         ON CONFLICT (brand_name) DO NOTHING
@@ -40,37 +34,16 @@ def populate_dimensions(cur):
         SELECT DISTINCT val FROM (
             SELECT oem AS val FROM raw.raw_market_prices WHERE oem IS NOT NULL
             UNION SELECT oem FROM raw.raw_sales WHERE oem IS NOT NULL
-            UNION SELECT oem FROM raw.raw_dealer_catalog WHERE oem IS NOT NULL
             UNION SELECT oem FROM raw.raw_inegi_sales WHERE oem IS NOT NULL
         ) t
         ON CONFLICT (oem_name) DO NOTHING
     """)
     print(f"    dim_oem: {cur.rowcount} inserted")
 
-    print("  Populating dim_source_channel...")
-    cur.execute("""
-        INSERT INTO core.dim_source_channel (source_name)
-        SELECT DISTINCT val FROM (
-            SELECT fuente AS val FROM raw.raw_leads WHERE fuente IS NOT NULL
-            UNION SELECT fuente FROM raw.raw_lead_activities WHERE fuente IS NOT NULL
-        ) t
-        ON CONFLICT (source_name) DO NOTHING
-    """)
-    print(f"    dim_source_channel: {cur.rowcount} inserted")
-
-    print("  Populating dim_campaign...")
-    cur.execute("""
-        INSERT INTO core.dim_campaign (campaign_name, subcampaign_name)
-        SELECT DISTINCT campania, subcampania FROM (
-            SELECT campania, subcampania FROM raw.raw_leads
-                WHERE campania IS NOT NULL
-            UNION
-            SELECT campania, subcampania FROM raw.raw_lead_activities
-                WHERE campania IS NOT NULL
-        ) t
-        ON CONFLICT (campaign_name, subcampaign_name) DO NOTHING
-    """)
-    print(f"    dim_campaign: {cur.rowcount} inserted")
+    # dim_source_channel and dim_campaign were only ever populated from raw_leads /
+    # raw_lead_activities. Now that leads no longer flow through this pipeline, those
+    # dimensions are frozen at whatever values were loaded historically. Existing
+    # fact_leads rows can still join to them; new ingestion does not extend them.
 
     print("  Populating dim_insurer...")
     cur.execute("""
@@ -89,9 +62,7 @@ def populate_dimensions(cur):
             NULL::uuid,
             t.producto
         FROM (
-            SELECT marca, producto FROM raw.raw_leads WHERE producto IS NOT NULL
-            UNION SELECT marca, producto FROM raw.raw_lead_activities WHERE producto IS NOT NULL
-            UNION SELECT marca, producto FROM raw.raw_finance_applications WHERE producto IS NOT NULL
+            SELECT marca, producto FROM raw.raw_finance_applications WHERE producto IS NOT NULL
         ) t
         LEFT JOIN core.dim_brand b ON b.brand_name = t.marca
         ON CONFLICT (brand_id, oem_id, product_name) DO NOTHING
@@ -134,164 +105,13 @@ def populate_dimensions(cur):
     print(f"    dim_model_version: {cur.rowcount} inserted")
 
     print("  Populating dim_dealer...")
-    # From dealer catalog (most authoritative)
-    cur.execute("""
-        INSERT INTO core.dim_dealer
-            (dealer_code, commercial_name, legal_name, rfc, group_id, brand_id, oem_id,
-             classification, dms, crm, workshop_status, start_sales_date)
-        SELECT DISTINCT ON (dc.codigo_distribuidor)
-            dc.codigo_distribuidor,
-            dc.nombre_comercial,
-            dc.razon_social,
-            dc.rfc,
-            g.id,
-            b.id,
-            o.id,
-            dc.clasificacion,
-            dc.dms,
-            dc.crm,
-            dc.estatus_taller,
-            CASE
-                WHEN dc.fecha_inicio_ventas_raw IS NOT NULL
-                THEN dc.fecha_inicio_ventas_raw::date
-                ELSE NULL
-            END
-        FROM raw.raw_dealer_catalog dc
-        LEFT JOIN core.dim_group g ON g.group_name = dc.grupo
-        LEFT JOIN core.dim_brand b ON b.brand_name = dc.marca
-        LEFT JOIN core.dim_oem o ON o.oem_name = dc.oem
-        WHERE dc.nombre_comercial IS NOT NULL
-        ON CONFLICT (dealer_code) DO NOTHING
-    """)
-    dealer_catalog_count = cur.rowcount
-    print(f"    dim_dealer (from catalog): {dealer_catalog_count} inserted")
+    # Dealer catalog is managed manually (authoritative) and must not be mutated by uploads.
+    # Therefore, this ETL does not INSERT/UPDATE `core.dim_dealer`.
+    print("    dim_dealer: skipped (manual DB-managed dimension)")
 
-    # Also create dealers from other sources if they don't exist in catalog
-    # Use distribuidor name as commercial_name
-    cur.execute("""
-        INSERT INTO core.dim_dealer (commercial_name, group_id, brand_id)
-        SELECT DISTINCT
-            t.distribuidor,
-            g.id,
-            b.id
-        FROM (
-            SELECT distribuidor, grupo, marca FROM raw.raw_leads WHERE distribuidor IS NOT NULL
-            UNION SELECT distribuidor, grupo, marca FROM raw.raw_lead_activities WHERE distribuidor IS NOT NULL
-            UNION SELECT distribuidor_ok, grupo, marca FROM raw.raw_finance_applications WHERE distribuidor_ok IS NOT NULL
-            UNION SELECT dealer, group_name, brand FROM raw.raw_sales WHERE dealer IS NOT NULL
-        ) t
-        LEFT JOIN core.dim_group g ON g.group_name = t.grupo
-        LEFT JOIN core.dim_brand b ON b.brand_name = t.marca
-        WHERE NOT EXISTS (
-            SELECT 1 FROM core.dim_dealer d WHERE d.commercial_name = t.distribuidor
-        )
-        ON CONFLICT DO NOTHING
-    """)
-    print(f"    dim_dealer (from raw sources): {cur.rowcount} inserted")
-
-    print("  Populating dim_advisor...")
-    cur.execute("""
-        INSERT INTO core.dim_advisor (advisor_name, dealer_id)
-        SELECT DISTINCT
-            t.asesor,
-            d.id
-        FROM (
-            SELECT asesor, distribuidor FROM raw.raw_leads WHERE asesor IS NOT NULL
-            UNION SELECT asesor, distribuidor FROM raw.raw_lead_activities WHERE asesor IS NOT NULL
-        ) t
-        LEFT JOIN core.dim_dealer d ON d.commercial_name = t.distribuidor
-        ON CONFLICT (advisor_name, dealer_id) DO NOTHING
-    """)
-    print(f"    dim_advisor: {cur.rowcount} inserted")
+    # dim_advisor was only fed from raw_leads / raw_lead_activities. Frozen for the same reason.
 
     print("  Dimensions populated.")
-
-
-def populate_fact_leads(cur):
-    """raw.raw_leads → core.fact_leads."""
-    print("  Loading fact_leads...")
-    cur.execute("""
-        INSERT INTO core.fact_leads
-            (aglead, dealer_id, group_id, brand_id, product_id, advisor_id,
-             campaign_id, source_channel_id,
-             lead_origin_ts, lead_origin_date, lead_origin_hour, lead_month_num,
-             temperature, status, finalization_reason, attention_channel, lead_title,
-             source_import_batch_id)
-        SELECT
-            r.aglead,
-            d.id,
-            g.id,
-            b.id,
-            p.id,
-            adv.id,
-            camp.id,
-            sc.id,
-            CASE WHEN r.fecha_origen_raw IS NOT NULL
-                 THEN r.fecha_origen_raw::timestamptz ELSE NULL END,
-            CASE WHEN r.fecha_origen_raw IS NOT NULL
-                 THEN r.fecha_origen_raw::date ELSE NULL END,
-            CASE WHEN r.hora_origen_raw ~ '^[0-9]+$'
-                 THEN r.hora_origen_raw::integer ELSE NULL END,
-            EXTRACT(MONTH FROM r.fecha_origen_raw::date),
-            r.temperatura,
-            r.estatus,
-            r.motivo_finalizacion,
-            r.medio_atencion,
-            r.titulo_lead,
-            r.import_batch_id
-        FROM raw.raw_leads r
-        LEFT JOIN core.dim_dealer d ON d.commercial_name = r.distribuidor
-        LEFT JOIN core.dim_group g ON g.group_name = r.grupo
-        LEFT JOIN core.dim_brand b ON b.brand_name = r.marca
-        LEFT JOIN core.dim_product p ON p.product_name = r.producto AND p.brand_id = b.id
-        LEFT JOIN core.dim_advisor adv ON adv.advisor_name = r.asesor AND adv.dealer_id = d.id
-        LEFT JOIN core.dim_campaign camp ON camp.campaign_name = r.campania
-            AND (camp.subcampaign_name = r.subcampania OR (camp.subcampaign_name IS NULL AND r.subcampania IS NULL))
-        LEFT JOIN core.dim_source_channel sc ON sc.source_name = r.fuente
-        ON CONFLICT (aglead) DO NOTHING
-    """)
-    print(f"    fact_leads: {cur.rowcount} inserted")
-
-
-def populate_fact_lead_activities(cur):
-    """raw.raw_lead_activities → core.fact_lead_activities."""
-    print("  Loading fact_lead_activities...")
-    cur.execute("""
-        INSERT INTO core.fact_lead_activities
-            (aglead, dealer_id, group_id, brand_id, product_id, advisor_id,
-             campaign_id, source_channel_id,
-             activity_ts, planned_ts, activity_name, activity_status, temperature,
-             source_import_batch_id)
-        SELECT
-            r.aglead,
-            d.id,
-            g.id,
-            b.id,
-            p.id,
-            adv.id,
-            camp.id,
-            sc.id,
-            CASE WHEN r.fecha_actividad_raw IS NOT NULL
-                 THEN r.fecha_actividad_raw::timestamptz ELSE NULL END,
-            CASE WHEN r.fecha_programada_raw IS NOT NULL
-                 THEN r.fecha_programada_raw::timestamptz ELSE NULL END,
-            r.actividad,
-            r.estatus_actividad,
-            r.temperatura,
-            r.import_batch_id
-        FROM raw.raw_lead_activities r
-        -- Only include activities whose lead exists in fact_leads
-        INNER JOIN core.fact_leads fl ON fl.aglead = r.aglead
-        LEFT JOIN core.dim_dealer d ON d.commercial_name = r.distribuidor
-        LEFT JOIN core.dim_group g ON g.group_name = r.grupo
-        LEFT JOIN core.dim_brand b ON b.brand_name = r.marca
-        LEFT JOIN core.dim_product p ON p.product_name = r.producto AND p.brand_id = b.id
-        LEFT JOIN core.dim_advisor adv ON adv.advisor_name = r.asesor AND adv.dealer_id = d.id
-        LEFT JOIN core.dim_campaign camp ON camp.campaign_name = r.campania
-            AND (camp.subcampaign_name = r.subcampania OR (camp.subcampaign_name IS NULL AND r.subcampania IS NULL))
-        LEFT JOIN core.dim_source_channel sc ON sc.source_name = r.fuente
-    """)
-    print(f"    fact_lead_activities: {cur.rowcount} inserted")
 
 
 def populate_fact_finance_applications(cur):
@@ -327,17 +147,25 @@ def populate_fact_finance_applications(cur):
                  THEN r.plazo_meses_raw::integer ELSE NULL END,
             CASE WHEN r.anio_modelo_raw ~ '^[0-9]+$'
                  THEN r.anio_modelo_raw::integer ELSE NULL END,
-            NULL::text,
+            r.modelo,
             r.carline,
             r.version,
-            CASE WHEN r.monto_unidad_raw ~ '^[[0-9].]+$'
-                 THEN r.monto_unidad_raw::numeric(14,2) ELSE NULL END,
-            CASE WHEN r.enganche_raw ~ '^[[0-9].]+$'
-                 THEN r.enganche_raw::numeric(14,2) ELSE NULL END,
-            CASE WHEN r.porcentaje_enganche_raw ~ '^[[0-9].]+$'
-                 THEN r.porcentaje_enganche_raw::numeric(8,4) ELSE NULL END,
-            CASE WHEN r.monto_financiado_raw ~ '^[[0-9].]+$'
-                 THEN r.monto_financiado_raw::numeric(14,2) ELSE NULL END,
+            CASE
+                WHEN r.monto_unidad_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.monto_unidad_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
+            CASE
+                WHEN r.enganche_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.enganche_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
+            CASE
+                WHEN r.porcentaje_enganche_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.porcentaje_enganche_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(8,4)
+            END,
+            CASE
+                WHEN r.monto_financiado_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.monto_financiado_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
             CASE WHEN r.aprobado_raw = '1' THEN true
                  WHEN r.aprobado_raw = '0' THEN false ELSE NULL END,
             CASE WHEN r.base_flag_raw = '1' THEN true
@@ -368,12 +196,18 @@ def populate_fact_market_prices(cur):
             b.id,
             NULL::uuid,
             mv.id,
-            CASE WHEN r.precio_lista_raw ~ '^[[0-9].]+$'
-                 THEN r.precio_lista_raw::numeric(14,2) ELSE NULL END,
-            CASE WHEN r.precio_contado_neto_raw ~ '^[[0-9].]+$'
-                 THEN r.precio_contado_neto_raw::numeric(14,2) ELSE NULL END,
-            CASE WHEN r.precio_financiado_raw ~ '^[[0-9].]+$'
-                 THEN r.precio_financiado_raw::numeric(14,2) ELSE NULL END,
+            CASE
+                WHEN r.precio_lista_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.precio_lista_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
+            CASE
+                WHEN r.precio_contado_neto_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.precio_contado_neto_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
+            CASE
+                WHEN r.precio_financiado_raw IS NULL THEN NULL
+                ELSE NULLIF(regexp_replace(r.precio_financiado_raw, '[^0-9\\.-]', '', 'g'), '')::numeric(14,2)
+            END,
             r.moneda,
             r.import_batch_id
         FROM raw.raw_market_prices r
@@ -422,6 +256,8 @@ def populate_fact_sales(cur):
 def populate_fact_claims(cur):
     """raw.raw_claims → core.fact_claims."""
     print("  Loading fact_claims...")
+    # No unique key → full refresh
+    cur.execute("TRUNCATE core.fact_claims RESTART IDENTITY")
     cur.execute("""
         INSERT INTO core.fact_claims
             (claim_date, policy_number, insurer_id,
@@ -459,6 +295,8 @@ def populate_fact_claims(cur):
 def populate_fact_market_sales_inegi(cur):
     """raw.raw_inegi_sales → core.fact_market_sales_inegi."""
     print("  Loading fact_market_sales_inegi...")
+    # No unique key → full refresh
+    cur.execute("TRUNCATE core.fact_market_sales_inegi RESTART IDENTITY")
     cur.execute("""
         INSERT INTO core.fact_market_sales_inegi
             (year_num, month_name, brand_id, oem_id,
@@ -494,8 +332,6 @@ def run_transforms(cur):
     populate_dimensions(cur)
 
     print("\n=== TRANSFORM: Populating fact tables ===")
-    populate_fact_leads(cur)
-    populate_fact_lead_activities(cur)
     populate_fact_finance_applications(cur)
     populate_fact_market_prices(cur)
     populate_fact_sales(cur)

@@ -1,6 +1,7 @@
 # Secrets
 .env
 .streamlit/secrets.toml
+.streamlit/secrets_paste.txt
 
 # Python
 .venv/
@@ -13,5 +14,6 @@ __pycache__/
 # Source data (contains real dealer/customer data — never push to a public repo)
 *.xlsx
 ~$*.xlsx
+*.zip
 sample_uploads/
 Workshop DB RYD - ConMG.pdf

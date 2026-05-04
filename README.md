@@ -4,13 +4,18 @@ Streamlit app that ingests per-table Excel uploads into a Supabase Postgres DB. 
 
 ## What it does
 
-Accepts one Excel file per upload, validates headers against the selected table template, and runs:
+Accepts one Excel file per upload, validates the sheet against a per-table contract (expected headers in order, key-column completeness threshold), and runs:
 
-1. **Raw load** — bulk insert into `raw.*` with an `ingest.import_batches` record for traceability.
-2. **Dim refresh** — idempotent full-scan population of `core.dim_*` via `ON CONFLICT DO NOTHING`.
-3. **Fact refresh** — per-table. Tables with unique keys use `ON CONFLICT`; tables without (activities, claims, INEGI) use `TRUNCATE + INSERT` from full raw history.
+1. **Validate** — `etl/validate.py` runs structural checks against the workbook and records every check (pass/warn/fail) into `ingest.import_validation_results`.
+2. **Idempotency** — if the same file checksum + sheet was already loaded successfully, the upload is skipped.
+3. **Raw load** — bulk insert into `raw.*` (with savepoints so a single bad chunk doesn't poison the transaction). Each load creates an `ingest.import_batches` row plus an `ingest.import_sheet_runs` audit record.
+4. **Reconcile** — compare reported `rows_loaded` against the actual count of rows tagged with the new `batch_id` in the target table.
+5. **Dim refresh** — idempotent full-scan population of `core.dim_*` via `ON CONFLICT DO NOTHING`. `core.dim_dealer` is *not* touched — it is treated as manually-governed master data.
+6. **Fact refresh** — per-table. Tables with unique keys use `ON CONFLICT`; tables without (claims, INEGI) use `TRUNCATE + INSERT` from full raw history.
 
-Supported tables: Leads, Lead Activities, Finance Applications, Market Prices, Sales, Claims, INEGI Sales.
+Supported tables: Finance Applications, Market Prices, Sales, Claims, INEGI Sales.
+
+> Leads / Lead Activities and the dealer catalog (CatalogoTiendas) are intentionally excluded. Leads no longer flow through this pipeline; the dealer catalog and any dealer alias mappings are governed manually inside the database.
 
 ## Local development
 
@@ -44,11 +49,20 @@ Opens at `http://localhost:8501`. Enter the app password to access the upload fo
 
 ```
 .
-├── app.py                           # single-file Streamlit app (UI + ETL)
+├── app.py                           # Streamlit UI shell (uses etl/* under the hood)
+├── etl/
+│   ├── db.py                        # Postgres connection (CLI usage)
+│   ├── extract.py                   # Per-sheet Excel readers + SHEET_MAP
+│   ├── validate.py                  # SHEET_CONTRACTS + validate_sheet_contract
+│   ├── audit.py                     # Writes to ingest.import_sheet_runs / errors / validation_results
+│   ├── load_raw.py                  # Bulk insert + idempotency + reconciliation
+│   ├── transform.py                 # Dimension and fact populators
+│   └── run.py                       # CLI orchestrator (python -m etl.run path/to.xlsx)
 ├── requirements.txt
 ├── .env.example
 ├── .streamlit/
 │   └── secrets.toml.example
-├── RYD-Schema.rtf                   # reference DDL for the Supabase schema
-└── etl/                             # legacy CLI pipeline; kept for reference, not used by the app
+└── RYD-Schema.rtf                   # reference DDL for the Supabase schema
 ```
+
+Both the Streamlit app and `python -m etl.run` go through the same validate / load / transform / audit primitives in `etl/`.

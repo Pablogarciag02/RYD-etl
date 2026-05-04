@@ -15,18 +15,32 @@ Excel File (from providers)
         │
         ▼
 ┌──────────────────────┐
-│  1. EXTRACT          │  Reads each Excel sheet, maps columns
-│     (Python/openpyxl) │  to the database schema
+│  1. VALIDATE         │  Per-sheet contract check: headers in order,
+│     (Python/openpyxl) │  key column completeness. Logged to
+│                      │  ingest.import_validation_results.
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│  2. LOAD RAW         │  Inserts rows into raw.* tables
-│     (Postgres)       │  Tracks each import in ingest.import_batches
+│  2. IDEMPOTENCY      │  If same checksum + sheet was already loaded
+│     (lookup)         │  successfully, skip and log a `skipped` sheet_run.
 └──────────┬───────────┘
            ▼
 ┌──────────────────────┐
-│  3. TRANSFORM        │  Populates dimension tables (dealers, brands, etc.)
-│     (SQL)            │  Populates fact tables with foreign key lookups
+│  3. EXTRACT          │  Reads the configured sheet, maps columns
+│     (Python/openpyxl) │  to the database schema.
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│  4. LOAD RAW         │  Inserts rows into raw.* with savepoint per chunk.
+│     (Postgres)       │  Reconciles loaded count vs. db_count_for_batch.
+│                      │  Tracks each import in ingest.import_batches
+│                      │  and ingest.import_sheet_runs.
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│  5. TRANSFORM        │  Populates dimension tables (brands, products, etc.)
+│     (SQL)            │  Populates fact tables with foreign-key lookups.
+│                      │  core.dim_dealer is governed manually — never written.
 └──────────────────────┘
 ```
 
@@ -44,13 +58,17 @@ Excel File (from providers)
 
 | Excel Sheet | Raw Table | What it contains | Frequency |
 |-------------|-----------|------------------|-----------|
-| BaseLeads1 | `raw.raw_leads` | Leads received by MG dealer network | Daily (Mon-Sat) |
-| BaseLeads2 | `raw.raw_lead_activities` | Activities performed on leads | Daily (Mon-Sat) |
-| BaseSolicitudes | `raw.raw_finance_applications` | Finance applications via Cetelem/Inbursa | Daily (Mon-Fri) |
-| BasePrecios | `raw.raw_market_prices` | Market prices by model/version | Monthly |
-| BaseVentasMG | `raw.raw_sales` | Sales by dealer (retail vs fleet) | Monthly |
+| DBSolicitudes_Cetelem | `raw.raw_finance_applications` | Finance applications via Cetelem/Inbursa | Daily (Mon-Fri) |
+| DBPreciosMexico_ConMG | `raw.raw_market_prices` | Market prices by model/version | Monthly |
+| DBVentas_ConMG | `raw.raw_sales` | Sales by dealer (retail vs fleet) | Monthly |
+| DBSiniestros_Marsh | `raw.raw_claims` | Insurance claims (Marsh) | Monthly |
+| BaseINEGIAutosLigerosMexico | `raw.raw_inegi_sales` | INEGI light-vehicle market benchmark | Monthly |
 
-**Planned (tables exist, awaiting data):** Claims (Marsh), INEGI market benchmark, Dealer catalog.
+### Excluded by design
+
+- **Leads / Lead Activities** (`BaseLeads1`, `BaseLeads2`): no longer ingested through this pipeline. Historical `raw.raw_leads`, `raw.raw_lead_activities`, `core.fact_leads`, `core.fact_lead_activities` remain queryable but receive no new rows.
+- **Dealer catalog** (`CatalogoTiendas ConMG`) and dealer alias mappings: managed manually in the database. The ETL never writes to `core.dim_dealer` or `core.dealer_alias_map`.
+- **`core.dim_source_channel` and `core.dim_campaign`** were only ever fed from leads data. They retain their historical values; new ingestion does not extend them.
 
 ---
 
@@ -92,13 +110,16 @@ That's it. The pipeline handles everything: reading the Excel, creating import b
 agenticRYD/
 ├── .env                  # Supabase connection credentials
 ├── requirements.txt      # Python dependencies
+├── app.py                # Streamlit upload UI (uses etl/* under the hood)
 ├── etl/
-│   ├── db.py             # Database connection
-│   ├── extract.py        # Excel readers (one per sheet)
-│   ├── load_raw.py       # Batch tracking + bulk insert
+│   ├── db.py             # Database connection (CLI usage)
+│   ├── extract.py        # Excel readers (one per sheet) + SHEET_MAP
+│   ├── validate.py       # SHEET_CONTRACTS + per-sheet validation checks
+│   ├── audit.py          # ingest.import_sheet_runs / errors / validation_results helpers
+│   ├── load_raw.py       # Bulk insert + idempotency + reconciliation
 │   ├── transform.py      # Dimension + fact table population
-│   └── run.py            # Main orchestrator
-├── BasesEjemplo.xlsx     # Sample data file
+│   └── run.py            # CLI orchestrator
+├── DefinicionBasesConMG.xlsx   # Sample data file
 └── RYD-Schema.rtf        # Database schema DDL
 ```
 
@@ -106,7 +127,6 @@ agenticRYD/
 
 ## Next steps
 
-- **Idempotency**: Add deduplication so re-running with the same file doesn't create duplicates
 - **Incremental loads**: Only process new/changed rows instead of full reload
-- **Missing sources**: Integrate claims, INEGI, and dealer catalog data when available
+- **Dealer catalog reconciliation**: Surface raw `distribuidor` strings that don't match any `core.dim_dealer.commercial_name` so the steward can resolve them
 - **Scheduling**: Automate runs on a schedule matching provider delivery frequency

@@ -54,88 +54,6 @@ def read_sheets(filepath):
     return result
 
 
-def extract_leads(filepath):
-    """BaseLeads1 → raw.raw_leads rows."""
-    wb = load_workbook(filepath, read_only=True, data_only=True)
-    ws = wb["BaseLeads1"]
-    rows = ws.iter_rows(min_row=2, values_only=True)
-    for row_num, row in enumerate(rows, start=2):
-        if not row or not row[0]:
-            continue
-        yield {
-            "source_row_number": row_num,
-            "aglead": _str(row[0]),
-            "distribuidor": _str(row[1]),
-            "fecha_origen_raw": _dt_str(row[2]),
-            "hora_origen_raw": _num_str(row[3]),
-            "grupo": _str(row[17]),
-            "marca": _str(row[16]),
-            "producto": _str(row[5]),
-            "asesor": _str(row[7]),
-            "campania": _str(row[10]),
-            "subcampania": _str(row[11]),
-            "fuente": _str(row[8]),
-            "medio_atencion": _str(row[14]),
-            "titulo_lead": _str(row[15]),
-            "temperatura": _str(row[6]),
-            "estatus": _str(row[9]),
-            "motivo_finalizacion": _str(row[13]),
-            "raw_payload": json.dumps({
-                "mes_lead": row[4],
-                "tiempo_respuesta": row[12],
-            }, default=str) if (row[4] is not None or row[12] is not None) else None,
-        }
-    wb.close()
-
-
-def extract_lead_activities(filepath):
-    """BaseLeads2 → raw.raw_lead_activities rows."""
-    wb = load_workbook(filepath, read_only=True, data_only=True)
-    ws = wb["BaseLeads2"]
-    rows = ws.iter_rows(min_row=2, values_only=True)
-    for row_num, row in enumerate(rows, start=2):
-        if not row or not row[0]:
-            continue
-        # Fecha Actividad is a full datetime — split into date+time parts
-        fecha_act = row[2]
-        hora_act = None
-        if isinstance(fecha_act, datetime):
-            hora_act = str(fecha_act.hour)
-        fecha_act_raw = _dt_str(fecha_act)
-
-        # Fecha Planeada can be Excel serial number
-        fecha_plan = row[9]
-        hora_plan = None
-        if isinstance(fecha_plan, (int, float)):
-            dt = _excel_serial_to_datetime(fecha_plan)
-            if dt:
-                hora_plan = str(dt.hour)
-                fecha_plan = dt
-        fecha_plan_raw = _dt_str(fecha_plan)
-
-        yield {
-            "source_row_number": row_num,
-            "aglead": _str(row[0]),
-            "fecha_actividad_raw": fecha_act_raw,
-            "hora_actividad_raw": hora_act,
-            "fecha_programada_raw": fecha_plan_raw,
-            "hora_programada_raw": hora_plan,
-            "distribuidor": _str(row[1]),
-            "grupo": _str(row[12]),
-            "marca": _str(row[11]),
-            "producto": _str(row[3]),
-            "asesor": _str(row[5]),
-            "campania": _str(row[7]),
-            "subcampania": None,
-            "fuente": _str(row[6]),
-            "actividad": _str(row[8]),
-            "estatus_actividad": _str(row[10]),
-            "temperatura": _str(row[4]),
-            "raw_payload": None,
-        }
-    wb.close()
-
-
 def extract_finance_applications(filepath):
     """DBSolicitudes_Cetelem → raw.raw_finance_applications rows."""
     wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -291,10 +209,10 @@ def extract_inegi_sales(filepath):
 
 
 # Map of sheet name → (extractor function, raw table name).
-# Sheets not listed here (Resumen, CatalogoTiendas ConMG) are skipped.
+# Sheets not listed here are skipped:
+#   - Resumen, CatalogoTiendas ConMG: master/manual data, governed in DB
+#   - BaseLeads1, BaseLeads2: leads no longer flow through this pipeline
 SHEET_MAP = {
-    "BaseLeads1": (extract_leads, "raw.raw_leads"),
-    "BaseLeads2": (extract_lead_activities, "raw.raw_lead_activities"),
     "DBSolicitudes_Cetelem": (extract_finance_applications, "raw.raw_finance_applications"),
     "DBPreciosMexico_ConMG": (extract_market_prices, "raw.raw_market_prices"),
     "DBVentas_ConMG": (extract_sales, "raw.raw_sales"),
