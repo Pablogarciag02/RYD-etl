@@ -87,16 +87,20 @@ def get_connection():
         password=_secret("DB_PASSWORD"),
         sslmode="require",
     )
-    # Safety brake: any single statement that runs longer than 60s
-    # aborts cleanly instead of dragging the whole instance into
-    # IO/CPU exhaustion. Set via SET (not connect options=) so it
-    # works through Supabase's Supavisor pooler in any mode.
-    # The commit() is required: SET opens an implicit transaction in
-    # psycopg2's default non-autocommit mode, and returning a connection
-    # with an open transaction breaks any subsequent `conn.autocommit = ...`
-    # assignment (psycopg2 calls set_session() which forbids in-transaction).
+    # Safety brake: any single statement that runs longer than 5 minutes
+    # aborts cleanly. The original 60s was too tight for the legitimate
+    # fact-load transform (~300k rows × 4 joins × 4 regex_replace columns
+    # genuinely needs minutes, not seconds). 5 minutes is generous enough
+    # for that while still cutting off a truly runaway query before it
+    # drains the instance's IO budget.
+    # Set via SET (not connect options=) so it works through Supabase's
+    # Supavisor pooler in any mode. The commit() is required: SET opens
+    # an implicit transaction in psycopg2's default non-autocommit mode,
+    # and returning a connection with an open transaction breaks any
+    # subsequent `conn.autocommit = ...` assignment (psycopg2 calls
+    # set_session() which forbids in-transaction).
     with conn.cursor() as c:
-        c.execute("SET statement_timeout = 60000")
+        c.execute("SET statement_timeout = 300000")  # 5 minutes
     conn.commit()
     return conn
 
