@@ -79,7 +79,7 @@ def _secret(key, default=None):
 
 
 def get_connection():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=_secret("DB_HOST"),
         port=int(_secret("DB_PORT", 5432)),
         dbname=_secret("DB_NAME"),
@@ -87,6 +87,13 @@ def get_connection():
         password=_secret("DB_PASSWORD"),
         sslmode="require",
     )
+    # Safety brake: any single statement that runs longer than 60s
+    # aborts cleanly instead of dragging the whole instance into
+    # IO/CPU exhaustion. Set via SET (not connect options=) so it
+    # works through Supabase's Supavisor pooler in any mode.
+    with conn.cursor() as c:
+        c.execute("SET statement_timeout = 60000")
+    return conn
 
 
 # ══════════════════════════════════════════════════════════════

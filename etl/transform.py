@@ -225,29 +225,54 @@ def populate_fact_market_prices(cur):
 
 
 def populate_fact_sales(cur):
-    """raw.raw_sales → core.fact_sales."""
+    """raw.raw_sales → core.fact_sales.
+
+    Idempotent across re-uploads, including for sales whose product/dealer/etc.
+    don't match a dim row (product_id ends up NULL). The plain ON CONFLICT
+    unique constraint cannot dedupe rows with NULL in the key — Postgres treats
+    NULLs as distinct — so we additionally:
+      1. DISTINCT ON the business key inside this batch (handles intra-batch dupes)
+      2. WHERE NOT EXISTS … IS NOT DISTINCT FROM … against the existing fact
+         table (handles re-uploads that overlap previous loads).
+    The ON CONFLICT stays as a final safety net for the non-NULL fast path.
+    """
     print("  Loading fact_sales...")
     cur.execute("""
         INSERT INTO core.fact_sales
             (month_date, dealer_id, group_id, brand_id, oem_id, product_id,
              sale_type, units,
              source_import_batch_id)
-        SELECT
-            r.month_raw::date,
-            d.id,
-            g.id,
-            b.id,
-            o.id,
-            p.id,
-            r.sale_type,
-            CASE WHEN r.units_raw ~ '^-?[0-9]+$' THEN r.units_raw::integer ELSE 0 END,
-            r.import_batch_id
-        FROM raw.raw_sales r
-        LEFT JOIN core.dim_dealer d ON d.commercial_name = r.dealer
-        LEFT JOIN core.dim_group g ON g.group_name = r.group_name
-        LEFT JOIN core.dim_brand b ON b.brand_name = r.brand
-        LEFT JOIN core.dim_oem o ON o.oem_name = r.oem
-        LEFT JOIN core.dim_product p ON p.product_name = r.carline AND p.brand_id = b.id AND p.oem_id = o.id
+        SELECT DISTINCT ON (s.month_date, s.dealer_id, s.product_id, s.sale_type)
+            s.month_date, s.dealer_id, s.group_id, s.brand_id, s.oem_id, s.product_id,
+            s.sale_type, s.units, s.import_batch_id
+        FROM (
+            SELECT
+                r.month_raw::date AS month_date,
+                d.id              AS dealer_id,
+                g.id              AS group_id,
+                b.id              AS brand_id,
+                o.id              AS oem_id,
+                p.id              AS product_id,
+                r.sale_type       AS sale_type,
+                CASE WHEN r.units_raw ~ '^-?[0-9]+$' THEN r.units_raw::integer ELSE 0 END AS units,
+                r.import_batch_id AS import_batch_id
+            FROM raw.raw_sales r
+            LEFT JOIN core.dim_dealer  d ON d.commercial_name = r.dealer
+            LEFT JOIN core.dim_group   g ON g.group_name      = r.group_name
+            LEFT JOIN core.dim_brand   b ON b.brand_name      = r.brand
+            LEFT JOIN core.dim_oem     o ON o.oem_name        = r.oem
+            LEFT JOIN core.dim_product p ON p.product_name = r.carline
+                                        AND p.brand_id     = b.id
+                                        AND p.oem_id       = o.id
+        ) s
+        WHERE NOT EXISTS (
+            SELECT 1 FROM core.fact_sales f
+            WHERE f.month_date IS NOT DISTINCT FROM s.month_date
+              AND f.dealer_id  IS NOT DISTINCT FROM s.dealer_id
+              AND f.product_id IS NOT DISTINCT FROM s.product_id
+              AND f.sale_type  IS NOT DISTINCT FROM s.sale_type
+        )
+        ORDER BY s.month_date, s.dealer_id, s.product_id, s.sale_type
         ON CONFLICT (month_date, dealer_id, product_id, sale_type) DO NOTHING
     """)
     print(f"    fact_sales: {cur.rowcount} inserted")
