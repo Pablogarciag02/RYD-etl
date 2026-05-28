@@ -503,6 +503,11 @@ if submit:
                     )
             except Exception as e:
                 st.error(f"Upload failed: {e}")
+                # Show the full Python traceback in an expander so we can
+                # diagnose errors that the Streamlit Cloud log viewer truncates.
+                with st.expander("Technical traceback (click to expand)"):
+                    import traceback
+                    st.code(traceback.format_exc())
 
 if st.button("Upload another file"):
     st.session_state.form_nonce += 1
