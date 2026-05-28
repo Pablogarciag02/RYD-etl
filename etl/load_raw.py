@@ -128,13 +128,24 @@ def fail_import_batch(cur, batch_id, error_message=None):
     )
 
 
-def bulk_insert(cur, table_name, rows, batch_id, batch_size=1000):
+def bulk_insert(cur, conn, table_name, rows, batch_id, batch_size=5000):
     """
-    Insert rows into the given raw table.
-    Returns (detected, loaded, failed) counts where:
-    - detected: number of extracted rows yielded
-    - loaded: rows successfully inserted
-    - failed: rows that were part of failed insert batches
+    Insert rows into the given raw table with **chunked commits**, so a
+    connection drop loses at most one chunk's work instead of the entire
+    upload. Returns (detected, loaded, failed).
+
+    Why this matters: the previous design wrapped the full upload (raw
+    load + dimensions + facts) in one giant Postgres transaction. On
+    Streamlit Cloud + Supabase, the underlying connection has lifetime
+    limits we don't control; for large files (200k+ rows over ~2 hours)
+    the connection would drop mid-tx and Postgres would automatically
+    roll back everything. This refactor commits each chunk independently
+    so already-inserted rows are durable even if a later chunk fails.
+
+    Implementation: temporarily set conn.autocommit = True for the
+    duration of the load — every execute_values call then auto-commits
+    as its own transaction. The previous autocommit value is restored on
+    exit so the caller's transactional contract is unaffected.
     """
     buffered = []
     columns = None
@@ -142,25 +153,30 @@ def bulk_insert(cur, table_name, rows, batch_id, batch_size=1000):
     total_loaded = 0
     total_failed = 0
 
-    for row in rows:
-        total_detected += 1
-        row["import_batch_id"] = str(batch_id)
-        if columns is None:
-            columns = list(row.keys())
+    prior_autocommit = conn.autocommit
+    conn.autocommit = True
+    try:
+        for row in rows:
+            total_detected += 1
+            row["import_batch_id"] = str(batch_id)
+            if columns is None:
+                columns = list(row.keys())
 
-        values = tuple(row[c] for c in columns)
-        buffered.append(values)
+            values = tuple(row[c] for c in columns)
+            buffered.append(values)
 
-        if len(buffered) >= batch_size:
+            if len(buffered) >= batch_size:
+                loaded, failed = _flush(cur, table_name, columns, buffered)
+                total_loaded += loaded
+                total_failed += failed
+                buffered = []
+
+        if buffered:
             loaded, failed = _flush(cur, table_name, columns, buffered)
             total_loaded += loaded
             total_failed += failed
-            buffered = []
-
-    if buffered:
-        loaded, failed = _flush(cur, table_name, columns, buffered)
-        total_loaded += loaded
-        total_failed += failed
+    finally:
+        conn.autocommit = prior_autocommit
 
     return total_detected, total_loaded, total_failed
 
@@ -177,15 +193,14 @@ def count_rows_for_batch(cur, table_name: str, batch_id) -> int:
 
 
 def _flush(cur, table_name, columns, rows):
-    """Execute a batch INSERT. Returns (loaded, failed)."""
+    """Execute one batch INSERT. Returns (loaded, failed).
+
+    Called with the connection in autocommit mode (bulk_insert sets that),
+    so each successful execute_values is its own committed transaction and
+    a single bad batch can't poison subsequent ones — no savepoint needed.
+    """
     cols_sql = ", ".join(columns)
     template = "(" + ", ".join(["%s"] * len(columns)) + ")"
-
-    # Important: In Postgres, a single statement error aborts the whole transaction.
-    # Use a savepoint so one bad batch doesn't "poison" subsequent updates/audits.
-    savepoint_name = "sp_bulk_insert"
-    cur.execute(f"SAVEPOINT {savepoint_name}")
-
     try:
         execute_values(
             cur,
@@ -194,11 +209,7 @@ def _flush(cur, table_name, columns, rows):
             template=template,
             page_size=len(rows),
         )
-        cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
         return len(rows), 0
-
     except Exception as e:
-        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
-        cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
         print(f"    ERROR inserting batch into {table_name}: {e}")
         return 0, len(rows)

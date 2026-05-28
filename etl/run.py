@@ -197,7 +197,7 @@ def run_etl(filepath, sheets=None):
                 # 7) Extract + load raw
                 t0 = time.time()
                 rows = extractor(filepath)
-                detected, loaded, failed = bulk_insert(cur, table_name, rows, batch_id)
+                detected, loaded, failed = bulk_insert(cur, conn, table_name, rows, batch_id)
                 elapsed = time.time() - t0
 
                 # 8) Update batch + sheet run

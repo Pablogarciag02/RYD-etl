@@ -196,7 +196,27 @@ def _record_validation_checks(cur, batch_id, sheet_run_id, sheet_name, validatio
 
 
 def run_upload(file_obj, filename, table_code):
-    """Process one uploaded file for one table. Returns a stats dict."""
+    """Process one uploaded file for one table. Returns a stats dict.
+
+    Structure (per the 2026-05-28 refactor): the upload is split into
+    PHASES with commits between, so a long upload no longer requires one
+    multi-hour transaction.
+
+      PHASE 1 — idempotency check (read-only, no writes)
+      PHASE 2 — batch + sheet_run creation + validation (small writes,
+                each phase committed independently)
+      PHASE 3 — raw load via bulk_insert which commits every batch_size
+                rows in autocommit mode; on return raw is durable
+      PHASE 4 — transforms (dims + this table's fact) in a fresh
+                transaction. If they fail, the raw rows for this batch
+                are deleted in a follow-up tx so retries start clean.
+
+    Previously the whole upload was wrapped in a single transaction,
+    which on Streamlit Cloud + Supabase would silently roll back the
+    entire upload if the connection dropped mid-flight (~2h timeouts
+    we don't control). With chunked commits, a drop loses at most the
+    in-flight chunk.
+    """
     cfg = TABLES[table_code]
     sheet_name = cfg["template"]
     extractor, target_table = SHEET_MAP[sheet_name]
@@ -209,10 +229,13 @@ def run_upload(file_obj, filename, table_code):
     conn.autocommit = False
     started_at = datetime.utcnow()
 
+    batch_id = None
+    sheet_run_id = None
+
     try:
         cur = conn.cursor()
 
-        # ── Idempotency: same file checksum + sheet already processed? ──
+        # ── PHASE 1: idempotency check ──
         existing_batch_id = find_completed_batch(cur, tmp_path, sheet_name)
         if existing_batch_id is not None:
             counts = get_batch_counts(cur, existing_batch_id) or {}
@@ -252,7 +275,7 @@ def run_upload(file_obj, filename, table_code):
                 "facts_inserted": 0,
             }
 
-        # ── Create batch + sheet_run ──
+        # ── PHASE 2: batch + sheet_run creation + validation ──
         batch_id = create_import_batch(cur, tmp_path, sheet_name)
         sheet_run_id = create_sheet_run(
             cur=cur,
@@ -263,12 +286,12 @@ def run_upload(file_obj, filename, table_code):
         )
         conn.commit()
 
-        # ── Validation ──
         update_sheet_run_status(cur=cur, sheet_run_id=sheet_run_id, status="validating")
         conn.commit()
 
         validation = validate_sheet_contract(tmp_path, sheet_name)
         _record_validation_checks(cur, batch_id, sheet_run_id, sheet_name, validation)
+        conn.commit()  # commit validation results so they survive later drops
 
         if not validation["ok"]:
             record_import_error(
@@ -299,54 +322,98 @@ def run_upload(file_obj, filename, table_code):
             conn.commit()
             raise ValueError(validation["message"])
 
-        # ── Extract + load raw ──
         update_sheet_run_status(cur=cur, sheet_run_id=sheet_run_id, status="processing")
         conn.commit()
 
+        # ── PHASE 3: raw load with chunked commits ──
+        # bulk_insert toggles conn.autocommit internally so each chunk is
+        # its own committed transaction; on return raw is already durable
+        # on disk regardless of what happens next.
         rows = extractor(tmp_path)
-        detected, loaded, failed = bulk_insert(cur, target_table, rows, batch_id)
-        update_batch_status(cur, batch_id, detected, loaded, failed)
+        detected, loaded, failed = bulk_insert(cur, conn, target_table, rows, batch_id)
 
-        # ── Reconcile ──
-        db_count = count_rows_for_batch(cur, target_table, batch_id)
-        recon_ok = db_count == loaded
+        # ── PHASE 4: transforms (fresh transaction) ──
+        # If anything in this block fails, raw is still safe; the except
+        # below cleans up the orphaned raw rows for this batch and marks
+        # the batch failed so retries can start clean.
+        try:
+            db_count = count_rows_for_batch(cur, target_table, batch_id)
+            recon_ok = db_count == loaded
 
-        # ── Transform: dimensions + this table's facts ──
-        populate_dimensions(cur)
-        fact_fn(cur)
+            populate_dimensions(cur)
+            # Pass batch_id so the fact load only processes THIS batch's
+            # raw rows instead of rescanning the whole raw table.
+            fact_fn(cur, batch_id=batch_id)
 
-        update_sheet_run_status(
-            cur=cur,
-            sheet_run_id=sheet_run_id,
-            status="success" if failed == 0 else "partial_success",
-            rows_detected=detected,
-            rows_loaded=loaded,
-            rows_failed=failed,
-            notes=None if recon_ok else f"Row count mismatch: loaded={loaded} db_count={db_count}",
-            started_at=started_at,
-            finished_at=datetime.utcnow(),
-            metadata={
-                "reconciliation": {
-                    "detected": detected,
-                    "loaded": loaded,
-                    "failed": failed,
-                    "db_count_for_batch": db_count,
-                    "ok": recon_ok,
+            update_batch_status(cur, batch_id, detected, loaded, failed)
+            update_sheet_run_status(
+                cur=cur,
+                sheet_run_id=sheet_run_id,
+                status="success" if failed == 0 else "partial_success",
+                rows_detected=detected,
+                rows_loaded=loaded,
+                rows_failed=failed,
+                notes=None if recon_ok else f"Row count mismatch: loaded={loaded} db_count={db_count}",
+                started_at=started_at,
+                finished_at=datetime.utcnow(),
+                metadata={
+                    "reconciliation": {
+                        "detected": detected,
+                        "loaded": loaded,
+                        "failed": failed,
+                        "db_count_for_batch": db_count,
+                        "ok": recon_ok,
+                    },
                 },
-            },
-        )
+            )
+            conn.commit()
 
-        conn.commit()
-        return {
-            "skipped": False,
-            "batch_id": str(batch_id),
-            "raw_loaded": loaded,
-            "raw_failed": failed,
-            "facts_inserted": cur.rowcount,
-        }
+            return {
+                "skipped": False,
+                "batch_id": str(batch_id),
+                "raw_loaded": loaded,
+                "raw_failed": failed,
+                "facts_inserted": cur.rowcount,
+            }
+
+        except Exception as transform_err:
+            # Roll back any partial transform work, then clean up the
+            # raw rows that were committed in Phase 3 (otherwise they
+            # sit orphaned in raw forever) and mark the batch failed.
+            conn.rollback()
+            try:
+                cur.execute(
+                    f"DELETE FROM {target_table} WHERE import_batch_id = %s",
+                    (str(batch_id),),
+                )
+                fail_import_batch(cur, batch_id, f"Transform failed: {transform_err}")
+                update_sheet_run_status(
+                    cur=cur,
+                    sheet_run_id=sheet_run_id,
+                    status="failed",
+                    rows_detected=detected,
+                    rows_loaded=0,
+                    rows_failed=loaded,
+                    notes=(
+                        f"Transform stage failed: {transform_err}. "
+                        f"Raw rows for this batch were deleted to keep state consistent."
+                    ),
+                    started_at=started_at,
+                    finished_at=datetime.utcnow(),
+                    metadata={"phase": "transform", "exception_class": type(transform_err).__name__},
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            raise
 
     except Exception:
-        conn.rollback()
+        # Anything in Phase 1/2 — uncommitted state is rolled back; Phase
+        # 3/4 have their own handling above. Re-raise so the UI shows it.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
         conn.close()

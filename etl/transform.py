@@ -114,10 +114,17 @@ def populate_dimensions(cur):
     print("  Dimensions populated.")
 
 
-def populate_fact_finance_applications(cur):
-    """raw.raw_finance_applications → core.fact_finance_applications."""
+def populate_fact_finance_applications(cur, batch_id=None):
+    """raw.raw_finance_applications → core.fact_finance_applications.
+
+    When batch_id is provided, only processes rows from that import batch
+    (cheap, bounded work — used by the per-upload web flow). When None,
+    processes the entire raw table (used by the CLI for full rebuilds).
+    """
     print("  Loading fact_finance_applications...")
-    cur.execute("""
+    where_sql = "WHERE r.import_batch_id = %s" if batch_id is not None else ""
+    params = [str(batch_id)] if batch_id is not None else []
+    cur.execute(f"""
         INSERT INTO core.fact_finance_applications
             (folio, dealer_id, group_id, brand_id, product_id,
              received_ts, ok_date, request_period_yyyymm,
@@ -178,15 +185,20 @@ def populate_fact_finance_applications(cur):
         LEFT JOIN core.dim_group g ON g.group_name = r.grupo
         LEFT JOIN core.dim_brand b ON b.brand_name = r.marca
         LEFT JOIN core.dim_product p ON p.product_name = r.producto AND p.brand_id = b.id
+        {where_sql}
         ON CONFLICT (folio) DO NOTHING
-    """)
+    """, params)
     print(f"    fact_finance_applications: {cur.rowcount} inserted")
 
 
-def populate_fact_market_prices(cur):
-    """raw.raw_market_prices → core.fact_market_prices."""
+def populate_fact_market_prices(cur, batch_id=None):
+    """raw.raw_market_prices → core.fact_market_prices.
+    See populate_fact_finance_applications for the batch_id contract.
+    """
     print("  Loading fact_market_prices...")
-    cur.execute("""
+    batch_filter = "AND r.import_batch_id = %s" if batch_id is not None else ""
+    params = [str(batch_id)] if batch_id is not None else []
+    cur.execute(f"""
         INSERT INTO core.fact_market_prices
             (month_date, brand_id, oem_id, model_version_id,
              retail_price, cash_net_price, finance_price, currency,
@@ -219,12 +231,13 @@ def populate_fact_market_prices(cur):
             AND (mv.model_year = CASE WHEN r.anio_modelo_raw ~ '^[0-9]+$' THEN r.anio_modelo_raw::integer ELSE NULL END
                  OR mv.model_year IS NULL)
         WHERE mv.id IS NOT NULL
+          {batch_filter}
         ON CONFLICT (month_date, model_version_id) DO NOTHING
-    """)
+    """, params)
     print(f"    fact_market_prices: {cur.rowcount} inserted")
 
 
-def populate_fact_sales(cur):
+def populate_fact_sales(cur, batch_id=None):
     """raw.raw_sales → core.fact_sales.
 
     Idempotent across re-uploads, including for sales whose product/dealer/etc.
@@ -235,9 +248,13 @@ def populate_fact_sales(cur):
       2. WHERE NOT EXISTS … IS NOT DISTINCT FROM … against the existing fact
          table (handles re-uploads that overlap previous loads).
     The ON CONFLICT stays as a final safety net for the non-NULL fast path.
+
+    See populate_fact_finance_applications for the batch_id contract.
     """
     print("  Loading fact_sales...")
-    cur.execute("""
+    raw_filter = "WHERE r.import_batch_id = %s" if batch_id is not None else ""
+    params = [str(batch_id)] if batch_id is not None else []
+    cur.execute(f"""
         INSERT INTO core.fact_sales
             (month_date, dealer_id, group_id, brand_id, oem_id, product_id,
              sale_type, units,
@@ -264,6 +281,7 @@ def populate_fact_sales(cur):
             LEFT JOIN core.dim_product p ON p.product_name = r.carline
                                         AND p.brand_id     = b.id
                                         AND p.oem_id       = o.id
+            {raw_filter}
         ) s
         WHERE NOT EXISTS (
             SELECT 1 FROM core.fact_sales f
@@ -274,12 +292,19 @@ def populate_fact_sales(cur):
         )
         ORDER BY s.month_date, s.dealer_id, s.product_id, s.sale_type
         ON CONFLICT (month_date, dealer_id, product_id, sale_type) DO NOTHING
-    """)
+    """, params)
     print(f"    fact_sales: {cur.rowcount} inserted")
 
 
-def populate_fact_claims(cur):
-    """raw.raw_claims → core.fact_claims."""
+def populate_fact_claims(cur, batch_id=None):
+    """raw.raw_claims → core.fact_claims.
+
+    NOTE: batch_id is accepted for signature consistency with the other
+    fact loaders but is intentionally ignored — fact_claims has no usable
+    natural unique key today, so this loader does a full TRUNCATE+rebuild
+    every time. A real batch-scoped + idempotent design needs an Aldo
+    conversation about the claim's intended unique key.
+    """
     print("  Loading fact_claims...")
     # No unique key → full refresh
     cur.execute("TRUNCATE core.fact_claims RESTART IDENTITY")
@@ -317,8 +342,12 @@ def populate_fact_claims(cur):
     print(f"    fact_claims: {cur.rowcount} inserted")
 
 
-def populate_fact_market_sales_inegi(cur):
-    """raw.raw_inegi_sales → core.fact_market_sales_inegi."""
+def populate_fact_market_sales_inegi(cur, batch_id=None):
+    """raw.raw_inegi_sales → core.fact_market_sales_inegi.
+
+    Same caveat as populate_fact_claims: batch_id is accepted for signature
+    consistency but ignored; this loader does a full TRUNCATE+rebuild.
+    """
     print("  Loading fact_market_sales_inegi...")
     # No unique key → full refresh
     cur.execute("TRUNCATE core.fact_market_sales_inegi RESTART IDENTITY")
