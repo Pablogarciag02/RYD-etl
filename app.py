@@ -149,13 +149,26 @@ def _save_uploaded_bytes_as_named_sheet(file_bytes, sheet_name):
     with open(path, "wb") as f:
         f.write(file_bytes)
 
-    wb = load_workbook(path)
+    # Cheap streaming check first — load_workbook() in default (writable)
+    # mode pulls the entire workbook into RAM, which can OOM a small
+    # Streamlit Cloud container on large files (e.g. a 42 MB workbook can
+    # balloon past 1 GB in memory). Only fall back to writable mode if a
+    # rename is actually required; for the common case where the uploaded
+    # workbook's first sheet already matches the contract name, we stay
+    # in streaming mode and never load the full workbook.
+    wb_ro = load_workbook(path, read_only=True, data_only=True)
     try:
-        if sheet_name not in wb.sheetnames:
+        sheet_already_named = sheet_name in wb_ro.sheetnames
+    finally:
+        wb_ro.close()
+
+    if not sheet_already_named:
+        wb = load_workbook(path)
+        try:
             wb.worksheets[0].title = sheet_name
             wb.save(path)
-    finally:
-        wb.close()
+        finally:
+            wb.close()
 
     return path
 
