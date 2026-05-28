@@ -91,8 +91,13 @@ def get_connection():
     # aborts cleanly instead of dragging the whole instance into
     # IO/CPU exhaustion. Set via SET (not connect options=) so it
     # works through Supabase's Supavisor pooler in any mode.
+    # The commit() is required: SET opens an implicit transaction in
+    # psycopg2's default non-autocommit mode, and returning a connection
+    # with an open transaction breaks any subsequent `conn.autocommit = ...`
+    # assignment (psycopg2 calls set_session() which forbids in-transaction).
     with conn.cursor() as c:
         c.execute("SET statement_timeout = 60000")
+    conn.commit()
     return conn
 
 
