@@ -153,7 +153,7 @@ def populate_fact_finance_applications(cur, batch_id=None):
              unit_amount, down_payment, down_payment_pct, financed_amount,
              approved_flag, base_flag, anf_flag,
              source_import_batch_id)
-        SELECT
+        SELECT DISTINCT ON (r.folio)
             r.folio::bigint,
             d.id,
             g.id,
@@ -201,11 +201,30 @@ def populate_fact_finance_applications(cur, batch_id=None):
                  WHEN r.anf_flag_raw = '0' THEN false ELSE NULL END,
             r.import_batch_id
         FROM raw.raw_finance_applications r
-        LEFT JOIN core.dim_dealer d ON d.commercial_name = r.distribuidor_ok
-        LEFT JOIN core.dim_group g ON g.group_name = r.grupo
-        LEFT JOIN core.dim_brand b ON b.brand_name = r.marca
-        LEFT JOIN core.dim_product p ON p.product_name = r.producto AND p.brand_id = b.id
+        -- Each dim is wrapped in a DISTINCT ON so it returns AT MOST ONE row
+        -- per natural key. The dim natural keys (commercial_name, group_name,
+        -- brand_name, (product_name, brand_id)) are NOT unique, so a plain
+        -- LEFT JOIN multiplies: this batch's 297k raw rows fanned out to 64.7M
+        -- join rows, which is what blew the statement_timeout. Collapsing each
+        -- join keeps the output at one row per raw row (same result the
+        -- ON CONFLICT produced, just without materialising the explosion).
+        LEFT JOIN (SELECT DISTINCT ON (commercial_name) commercial_name, id
+                   FROM core.dim_dealer ORDER BY commercial_name, id) d
+               ON d.commercial_name = r.distribuidor_ok
+        LEFT JOIN (SELECT DISTINCT ON (group_name) group_name, id
+                   FROM core.dim_group ORDER BY group_name, id) g
+               ON g.group_name = r.grupo
+        LEFT JOIN (SELECT DISTINCT ON (brand_name) brand_name, id
+                   FROM core.dim_brand ORDER BY brand_name, id) b
+               ON b.brand_name = r.marca
+        LEFT JOIN (SELECT DISTINCT ON (product_name, brand_id) product_name, brand_id, id
+                   FROM core.dim_product ORDER BY product_name, brand_id, id) p
+               ON p.product_name = r.producto AND p.brand_id = b.id
         {where_sql}
+        -- DISTINCT ON (r.folio) collapses the duplicate folios in the source
+        -- (297k rows -> 196k distinct folios); ORDER BY r.folio is required
+        -- for it and ON CONFLICT stays as the final cross-batch safety net.
+        ORDER BY r.folio
         ON CONFLICT (folio) DO NOTHING
     """, params)
     print(f"    fact_finance_applications: {cur.rowcount} inserted")
@@ -294,13 +313,28 @@ def populate_fact_sales(cur, batch_id=None):
                 CASE WHEN r.units_raw ~ '^-?[0-9]+$' THEN r.units_raw::integer ELSE 0 END AS units,
                 r.import_batch_id AS import_batch_id
             FROM raw.raw_sales r
-            LEFT JOIN core.dim_dealer  d ON d.commercial_name = r.dealer
-            LEFT JOIN core.dim_group   g ON g.group_name      = r.group_name
-            LEFT JOIN core.dim_brand   b ON b.brand_name      = r.brand
-            LEFT JOIN core.dim_oem     o ON o.oem_name        = r.oem
-            LEFT JOIN core.dim_product p ON p.product_name = r.carline
-                                        AND p.brand_id     = b.id
-                                        AND p.oem_id       = o.id
+            -- Same fan-out fix as fact_finance: the dim natural keys are not
+            -- unique, so plain LEFT JOINs multiply rows before the outer
+            -- DISTINCT ON collapses them. Wrap each dim in a DISTINCT ON so it
+            -- contributes at most one row per raw row.
+            LEFT JOIN (SELECT DISTINCT ON (commercial_name) commercial_name, id
+                       FROM core.dim_dealer ORDER BY commercial_name, id) d
+                   ON d.commercial_name = r.dealer
+            LEFT JOIN (SELECT DISTINCT ON (group_name) group_name, id
+                       FROM core.dim_group ORDER BY group_name, id) g
+                   ON g.group_name = r.group_name
+            LEFT JOIN (SELECT DISTINCT ON (brand_name) brand_name, id
+                       FROM core.dim_brand ORDER BY brand_name, id) b
+                   ON b.brand_name = r.brand
+            LEFT JOIN (SELECT DISTINCT ON (oem_name) oem_name, id
+                       FROM core.dim_oem ORDER BY oem_name, id) o
+                   ON o.oem_name = r.oem
+            LEFT JOIN (SELECT DISTINCT ON (product_name, brand_id, oem_id)
+                              product_name, brand_id, oem_id, id
+                       FROM core.dim_product ORDER BY product_name, brand_id, oem_id, id) p
+                   ON p.product_name = r.carline
+                  AND p.brand_id     = b.id
+                  AND p.oem_id       = o.id
             {raw_filter}
         ) s
         WHERE NOT EXISTS (

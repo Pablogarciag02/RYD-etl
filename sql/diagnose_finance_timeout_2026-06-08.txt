@@ -1,0 +1,30 @@
+-- ════════════════════════════════════════════════════════════════════
+-- RYD — measure the REAL finance transform runtime (2026-06-08, round 3)
+-- Returns ONE row: raw rows in the batch, distinct folios, how many rows
+-- the join produces, and how long the join takes. Read-only. Run it and
+-- paste the single result row back.
+-- ════════════════════════════════════════════════════════════════════
+
+WITH bid AS (
+  SELECT id FROM ingest.import_batches
+  WHERE source_sheet_name = 'DBSolicitudes_Cetelem'
+    AND status IN ('success','partial_success')
+  ORDER BY imported_at DESC NULLS LAST
+  LIMIT 1
+),
+t0 AS (SELECT clock_timestamp() AS s)
+SELECT
+  (SELECT count(*) FROM raw.raw_finance_applications
+     WHERE import_batch_id = (SELECT id FROM bid))            AS raw_rows,
+  (SELECT count(DISTINCT folio) FROM raw.raw_finance_applications
+     WHERE import_batch_id = (SELECT id FROM bid))            AS distinct_folios,
+  (SELECT count(*) FROM (
+      SELECT r.folio
+      FROM raw.raw_finance_applications r
+      LEFT JOIN core.dim_dealer  d  ON d.commercial_name = r.distribuidor_ok
+      LEFT JOIN core.dim_group   g  ON g.group_name      = r.grupo
+      LEFT JOIN core.dim_brand   bb ON bb.brand_name     = r.marca
+      LEFT JOIN core.dim_product p  ON p.product_name = r.producto AND p.brand_id = bb.id
+      WHERE r.import_batch_id = (SELECT id FROM bid)
+   ) q)                                                       AS join_output_rows,
+  clock_timestamp() - (SELECT s FROM t0)                      AS join_elapsed;
