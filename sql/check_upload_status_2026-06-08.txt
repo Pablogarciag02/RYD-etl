@@ -1,0 +1,28 @@
+-- ════════════════════════════════════════════════════════════════════
+-- RYD — what actually loaded? (2026-06-08) Read-only.
+-- Run both queries, paste both results back.
+-- ════════════════════════════════════════════════════════════════════
+
+-- Q1. The last ~15 import batches across all sheets, newest first.
+--     Look for: a DBVentas_ConMG row (did ventas create a batch at all?),
+--     its status (success / partial_success / failed / processing), and any
+--     'failed' rows from the mis-clicked upload + its notes (the real error).
+SELECT
+  source_sheet_name,
+  status,
+  rows_detected,
+  rows_loaded,
+  rows_failed,
+  left(id::text, 8) AS batch,
+  imported_at,
+  updated_at,
+  notes
+FROM ingest.import_batches
+ORDER BY COALESCE(updated_at, imported_at) DESC
+LIMIT 15;
+
+
+-- Q2. Fact-table totals, to confirm the data is actually present.
+SELECT 'fact_finance_applications' AS tbl, count(*) AS rows FROM core.fact_finance_applications
+UNION ALL
+SELECT 'fact_sales', count(*) FROM core.fact_sales;

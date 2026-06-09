@@ -1,0 +1,29 @@
+-- ════════════════════════════════════════════════════════════════════
+-- RYD — verify the join fan-out fix (2026-06-08)
+-- Runs the NEW deduped finance join against the live successful batch.
+-- BEFORE the fix this join produced 64,720,630 rows. AFTER, it should
+-- produce 297,079 (one row per raw row) and return in well under a second.
+-- Read-only.
+-- ════════════════════════════════════════════════════════════════════
+
+SELECT count(*) AS new_join_output_rows   -- expect 297079, not 64.7M
+FROM raw.raw_finance_applications r
+LEFT JOIN (SELECT DISTINCT ON (commercial_name) commercial_name, id
+           FROM core.dim_dealer ORDER BY commercial_name, id) d
+       ON d.commercial_name = r.distribuidor_ok
+LEFT JOIN (SELECT DISTINCT ON (group_name) group_name, id
+           FROM core.dim_group ORDER BY group_name, id) g
+       ON g.group_name = r.grupo
+LEFT JOIN (SELECT DISTINCT ON (brand_name) brand_name, id
+           FROM core.dim_brand ORDER BY brand_name, id) b
+       ON b.brand_name = r.marca
+LEFT JOIN (SELECT DISTINCT ON (product_name, brand_id) product_name, brand_id, id
+           FROM core.dim_product ORDER BY product_name, brand_id, id) p
+       ON p.product_name = r.producto AND p.brand_id = b.id
+WHERE r.import_batch_id = (
+  SELECT id FROM ingest.import_batches
+  WHERE source_sheet_name = 'DBSolicitudes_Cetelem'
+    AND status IN ('success','partial_success')
+  ORDER BY imported_at DESC NULLS LAST
+  LIMIT 1
+);

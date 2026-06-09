@@ -337,12 +337,21 @@ def populate_fact_sales(cur, batch_id=None):
                   AND p.oem_id       = o.id
             {raw_filter}
         ) s
+        -- Anti-join against the existing fact rows. We compare NULL-normalised
+        -- values (coalesce to sentinels) instead of `IS NOT DISTINCT FROM`
+        -- because the latter is NOT hash-joinable: Postgres was forced into a
+        -- nested-loop anti-join (~15k new rows x 1.33M existing fact_sales rows
+        -- ≈ 20B comparisons), which ran past the 10-min timeout. Plain equality
+        -- on coalesced columns is hashable, so the planner can use a single
+        -- hash anti-join (seconds). The sentinels (nil uuid / epoch date /
+        -- empty string) cannot collide with real keys, so this preserves the
+        -- exact NULL = NULL semantics of IS NOT DISTINCT FROM.
         WHERE NOT EXISTS (
             SELECT 1 FROM core.fact_sales f
-            WHERE f.month_date IS NOT DISTINCT FROM s.month_date
-              AND f.dealer_id  IS NOT DISTINCT FROM s.dealer_id
-              AND f.product_id IS NOT DISTINCT FROM s.product_id
-              AND f.sale_type  IS NOT DISTINCT FROM s.sale_type
+            WHERE coalesce(f.month_date, DATE '0001-01-01') = coalesce(s.month_date, DATE '0001-01-01')
+              AND coalesce(f.dealer_id,  '00000000-0000-0000-0000-000000000000'::uuid) = coalesce(s.dealer_id,  '00000000-0000-0000-0000-000000000000'::uuid)
+              AND coalesce(f.product_id, '00000000-0000-0000-0000-000000000000'::uuid) = coalesce(s.product_id, '00000000-0000-0000-0000-000000000000'::uuid)
+              AND coalesce(f.sale_type,  '') = coalesce(s.sale_type, '')
         )
         ORDER BY s.month_date, s.dealer_id, s.product_id, s.sale_type
         ON CONFLICT (month_date, dealer_id, product_id, sale_type) DO NOTHING

@@ -1,0 +1,55 @@
+-- ════════════════════════════════════════════════════════════════════
+-- RYD — verify the ventas (fact_sales) anti-join fix (2026-06-08)
+-- Runs the REWRITTEN sales transform SELECT (deduped dims + hash-joinable
+-- coalesce anti-join) read-only against the most recent ventas batch that
+-- still has raw rows, and counts what it WOULD insert.
+-- Watch the editor's reported run time: this should finish in SECONDS.
+-- (The old IS NOT DISTINCT FROM version ran 10 min and timed out.)
+-- Read-only — inserts nothing.
+-- ════════════════════════════════════════════════════════════════════
+
+SELECT count(*) AS rows_that_would_insert
+FROM (
+    SELECT DISTINCT ON (s.month_date, s.dealer_id, s.product_id, s.sale_type)
+        s.month_date, s.dealer_id, s.product_id, s.sale_type
+    FROM (
+        SELECT
+            r.month_raw::date AS month_date,
+            d.id  AS dealer_id,
+            b.id  AS brand_id,
+            o.id  AS oem_id,
+            p.id  AS product_id,
+            r.sale_type AS sale_type
+        FROM raw.raw_sales r
+        LEFT JOIN (SELECT DISTINCT ON (commercial_name) commercial_name, id
+                   FROM core.dim_dealer ORDER BY commercial_name, id) d
+               ON d.commercial_name = r.dealer
+        LEFT JOIN (SELECT DISTINCT ON (group_name) group_name, id
+                   FROM core.dim_group ORDER BY group_name, id) g
+               ON g.group_name = r.group_name
+        LEFT JOIN (SELECT DISTINCT ON (brand_name) brand_name, id
+                   FROM core.dim_brand ORDER BY brand_name, id) b
+               ON b.brand_name = r.brand
+        LEFT JOIN (SELECT DISTINCT ON (oem_name) oem_name, id
+                   FROM core.dim_oem ORDER BY oem_name, id) o
+               ON o.oem_name = r.oem
+        LEFT JOIN (SELECT DISTINCT ON (product_name, brand_id, oem_id)
+                          product_name, brand_id, oem_id, id
+                   FROM core.dim_product ORDER BY product_name, brand_id, oem_id, id) p
+               ON p.product_name = r.carline AND p.brand_id = b.id AND p.oem_id = o.id
+        WHERE r.import_batch_id = (
+            SELECT id FROM ingest.import_batches
+            WHERE source_sheet_name = 'DBVentas_ConMG'
+              AND status IN ('success','partial_success')
+            ORDER BY imported_at DESC NULLS LAST
+            LIMIT 1)
+    ) s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM core.fact_sales f
+        WHERE coalesce(f.month_date, DATE '0001-01-01') = coalesce(s.month_date, DATE '0001-01-01')
+          AND coalesce(f.dealer_id,  '00000000-0000-0000-0000-000000000000'::uuid) = coalesce(s.dealer_id,  '00000000-0000-0000-0000-000000000000'::uuid)
+          AND coalesce(f.product_id, '00000000-0000-0000-0000-000000000000'::uuid) = coalesce(s.product_id, '00000000-0000-0000-0000-000000000000'::uuid)
+          AND coalesce(f.sale_type,  '') = coalesce(s.sale_type, '')
+    )
+    ORDER BY s.month_date, s.dealer_id, s.product_id, s.sale_type
+) q;
