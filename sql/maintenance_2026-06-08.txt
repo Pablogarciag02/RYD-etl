@@ -1,0 +1,50 @@
+-- ════════════════════════════════════════════════════════════════════
+-- RYD — post-incident maintenance (2026-06-08)
+-- Run this AFTER deploying the batch-scoped transform fix.
+--
+-- Why:
+--   1. ANALYZE refreshes planner statistics so the transform's
+--      `WHERE import_batch_id = %s` filters use the idx_raw_*_import_batch_id
+--      indexes instead of seq-scanning the (now large, growing) raw tables.
+--      Stale stats are what made the planner go blind in the May incident.
+--   2. VACUUM reclaims the dead tuples left behind every time a finance/ventas
+--      transform failed and we DELETEd the orphaned raw rows + rolled back
+--      partial inserts. Bloat there inflates IO and slows every later scan.
+-- ════════════════════════════════════════════════════════════════════
+
+
+-- ── STEP 1 — refresh stats (safe to run as a single batch in the
+--             Supabase SQL editor; ANALYZE is allowed inside a transaction) ──
+
+ANALYZE raw.raw_finance_applications;
+ANALYZE raw.raw_sales;
+ANALYZE raw.raw_claims;
+ANALYZE raw.raw_market_prices;
+ANALYZE raw.raw_inegi_sales;
+
+ANALYZE core.dim_group;
+ANALYZE core.dim_brand;
+ANALYZE core.dim_oem;
+ANALYZE core.dim_product;
+ANALYZE core.dim_model_version;
+
+ANALYZE core.fact_finance_applications;
+ANALYZE core.fact_sales;
+
+
+-- ── STEP 2 — reclaim bloat (run each line ON ITS OWN; VACUUM cannot run
+--             inside a transaction block). In the Supabase SQL editor run
+--             them one at a time, or use psql. VACUUM (ANALYZE) also refreshes
+--             stats, so if you do Step 2 you can skip Step 1 for those tables. ──
+
+VACUUM (ANALYZE) raw.raw_finance_applications;
+VACUUM (ANALYZE) raw.raw_sales;
+VACUUM (ANALYZE) core.fact_finance_applications;
+VACUUM (ANALYZE) core.fact_sales;
+
+
+-- ── OPTIONAL — confirm dead-tuple counts dropped afterwards ──
+-- SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_analyze
+-- FROM pg_stat_user_tables
+-- WHERE schemaname IN ('raw','core')
+-- ORDER BY n_dead_tup DESC;

@@ -341,12 +341,25 @@ def run_upload(file_obj, filename, table_code):
         # below cleans up the orphaned raw rows for this batch and marks
         # the batch failed so retries can start clean.
         try:
+            # Pin the timeout for THIS transaction with a transaction-local
+            # setting. The connection-level `SET statement_timeout` in
+            # get_connection does not reliably follow the connection to the
+            # backend that runs this transform through Supabase's Supavisor
+            # pooler (it can land on a different backend still carrying the
+            # project default — the ~58s cancellations we kept seeing).
+            # set_config(..., is_local => true) is the SET LOCAL equivalent
+            # and is scoped to this transaction, so it holds regardless of
+            # pooler mode. 10 minutes is ample headroom for the now
+            # batch-scoped transform plus any lock waits.
+            cur.execute("SELECT set_config('statement_timeout', %s, true)", ("600000",))
+
             db_count = count_rows_for_batch(cur, target_table, batch_id)
             recon_ok = db_count == loaded
 
-            populate_dimensions(cur)
-            # Pass batch_id so the fact load only processes THIS batch's
-            # raw rows instead of rescanning the whole raw table.
+            # Pass batch_id so dimension and fact loads only touch THIS
+            # batch's raw rows instead of rescanning the whole (growing)
+            # raw tables.
+            populate_dimensions(cur, batch_id=batch_id)
             fact_fn(cur, batch_id=batch_id)
 
             update_batch_status(cur, batch_id, detected, loaded, failed)

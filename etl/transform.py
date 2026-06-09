@@ -1,43 +1,63 @@
 """Transform layer: populate core dimensions and fact tables from raw data."""
 
 
-def populate_dimensions(cur):
-    """Extract distinct values from raw tables into core dimension tables."""
+def populate_dimensions(cur, batch_id=None):
+    """Extract distinct values from raw tables into core dimension tables.
+
+    When batch_id is provided (the per-upload web flow), every raw scan is
+    restricted to that import batch's rows via the idx_raw_*_import_batch_id
+    indexes. This is correct AND complete: a single upload only ever adds
+    rows to one raw table, so all *new* dimension values live in this batch;
+    everything else already exists in the dim tables from earlier uploads
+    (and the ON CONFLICT DO NOTHING upserts re-add nothing). Without this
+    scope the step was O(total raw size) and grew slower with every file
+    ever uploaded — the main cause of the transform timing out.
+
+    When batch_id is None (the CLI full-rebuild via run_transforms) the raw
+    tables are scanned in full, exactly as before.
+    """
+    bf = " AND import_batch_id = %s" if batch_id is not None else ""
+    bid = str(batch_id) if batch_id is not None else None
+
+    def p(n):
+        """Params for a query that interpolates the batch filter n times."""
+        return [bid] * n if batch_id is not None else []
+
     print("  Populating dim_group...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_group (group_name)
         SELECT DISTINCT val FROM (
-            SELECT grupo AS val FROM raw.raw_finance_applications WHERE grupo IS NOT NULL
-            UNION SELECT group_name FROM raw.raw_sales WHERE group_name IS NOT NULL
-            UNION SELECT grupo FROM raw.raw_claims WHERE grupo IS NOT NULL
+            SELECT grupo AS val FROM raw.raw_finance_applications WHERE grupo IS NOT NULL{bf}
+            UNION SELECT group_name FROM raw.raw_sales WHERE group_name IS NOT NULL{bf}
+            UNION SELECT grupo FROM raw.raw_claims WHERE grupo IS NOT NULL{bf}
         ) t
         ON CONFLICT (group_name) DO NOTHING
-    """)
+    """, p(3))
     print(f"    dim_group: {cur.rowcount} inserted")
 
     print("  Populating dim_brand...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_brand (brand_name)
         SELECT DISTINCT val FROM (
-            SELECT marca AS val FROM raw.raw_finance_applications WHERE marca IS NOT NULL
-            UNION SELECT marca FROM raw.raw_market_prices WHERE marca IS NOT NULL
-            UNION SELECT brand FROM raw.raw_sales WHERE brand IS NOT NULL
-            UNION SELECT marca FROM raw.raw_inegi_sales WHERE marca IS NOT NULL
+            SELECT marca AS val FROM raw.raw_finance_applications WHERE marca IS NOT NULL{bf}
+            UNION SELECT marca FROM raw.raw_market_prices WHERE marca IS NOT NULL{bf}
+            UNION SELECT brand FROM raw.raw_sales WHERE brand IS NOT NULL{bf}
+            UNION SELECT marca FROM raw.raw_inegi_sales WHERE marca IS NOT NULL{bf}
         ) t
         ON CONFLICT (brand_name) DO NOTHING
-    """)
+    """, p(4))
     print(f"    dim_brand: {cur.rowcount} inserted")
 
     print("  Populating dim_oem...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_oem (oem_name)
         SELECT DISTINCT val FROM (
-            SELECT oem AS val FROM raw.raw_market_prices WHERE oem IS NOT NULL
-            UNION SELECT oem FROM raw.raw_sales WHERE oem IS NOT NULL
-            UNION SELECT oem FROM raw.raw_inegi_sales WHERE oem IS NOT NULL
+            SELECT oem AS val FROM raw.raw_market_prices WHERE oem IS NOT NULL{bf}
+            UNION SELECT oem FROM raw.raw_sales WHERE oem IS NOT NULL{bf}
+            UNION SELECT oem FROM raw.raw_inegi_sales WHERE oem IS NOT NULL{bf}
         ) t
         ON CONFLICT (oem_name) DO NOTHING
-    """)
+    """, p(3))
     print(f"    dim_oem: {cur.rowcount} inserted")
 
     # dim_source_channel and dim_campaign were only ever populated from raw_leads /
@@ -46,31 +66,31 @@ def populate_dimensions(cur):
     # fact_leads rows can still join to them; new ingestion does not extend them.
 
     print("  Populating dim_insurer...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_insurer (insurer_name)
         SELECT DISTINCT aseguradora FROM raw.raw_claims
-        WHERE aseguradora IS NOT NULL
+        WHERE aseguradora IS NOT NULL{bf}
         ON CONFLICT (insurer_name) DO NOTHING
-    """)
+    """, p(1))
     print(f"    dim_insurer: {cur.rowcount} inserted")
 
     print("  Populating dim_product...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_product (brand_id, oem_id, product_name)
         SELECT DISTINCT
             b.id,
             NULL::uuid,
             t.producto
         FROM (
-            SELECT marca, producto FROM raw.raw_finance_applications WHERE producto IS NOT NULL
+            SELECT marca, producto FROM raw.raw_finance_applications WHERE producto IS NOT NULL{bf}
         ) t
         LEFT JOIN core.dim_brand b ON b.brand_name = t.marca
         ON CONFLICT (brand_id, oem_id, product_name) DO NOTHING
-    """)
+    """, p(1))
     print(f"    dim_product: {cur.rowcount} inserted")
 
     # For sales, carline is the product — map it with brand/oem
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_product (brand_id, oem_id, product_name)
         SELECT DISTINCT
             b.id,
@@ -79,13 +99,13 @@ def populate_dimensions(cur):
         FROM raw.raw_sales s
         LEFT JOIN core.dim_brand b ON b.brand_name = s.brand
         LEFT JOIN core.dim_oem o ON o.oem_name = s.oem
-        WHERE s.carline IS NOT NULL
+        WHERE s.carline IS NOT NULL{" AND s.import_batch_id = %s" if batch_id is not None else ""}
         ON CONFLICT (brand_id, oem_id, product_name) DO NOTHING
-    """)
+    """, p(1))
     print(f"    dim_product (sales carlines): {cur.rowcount} inserted")
 
     print("  Populating dim_model_version...")
-    cur.execute("""
+    cur.execute(f"""
         INSERT INTO core.dim_model_version
             (brand_id, oem_id, model_name, version_name, body_type, doors, model_year, ryd_segment)
         SELECT DISTINCT
@@ -99,9 +119,9 @@ def populate_dimensions(cur):
             p.segmento_ryd
         FROM raw.raw_market_prices p
         LEFT JOIN core.dim_brand b ON b.brand_name = p.marca
-        WHERE p.modelo IS NOT NULL AND p.version IS NOT NULL
+        WHERE p.modelo IS NOT NULL AND p.version IS NOT NULL{" AND p.import_batch_id = %s" if batch_id is not None else ""}
         ON CONFLICT (brand_id, oem_id, model_name, version_name, model_year) DO NOTHING
-    """)
+    """, p(1))
     print(f"    dim_model_version: {cur.rowcount} inserted")
 
     print("  Populating dim_dealer...")
